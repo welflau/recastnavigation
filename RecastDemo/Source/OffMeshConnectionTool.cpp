@@ -106,7 +106,14 @@ void OffMeshConnectionTool::handleClick(const float* /*s*/, const float* p, bool
 		if (nearestIndex != -1 &&
 			sqrtf(nearestDist) < m_sample->getAgentRadius())
 		{
-			geom->deleteOffMeshConnection(nearestIndex);
+ 			geom->deleteOffMeshConnection(nearestIndex);
+
+			dtNavMesh* navMesh = m_sample->getNavMesh();
+			if (navMesh && nearestIndex < MAX_OMC_NUM && nearestIndex >= 0)
+			{
+				navMesh->RemoveOffMeshConnection(geom->GetOffMeshRef(nearestIndex));
+				geom->SetOffMeshRef(nearestIndex,0);
+			}
 		}
 	}
 	else
@@ -121,7 +128,16 @@ void OffMeshConnectionTool::handleClick(const float* /*s*/, const float* p, bool
 		{
 			const unsigned char area = SAMPLE_POLYAREA_JUMP;
 			const unsigned short flags = SAMPLE_POLYFLAGS_JUMP; 
-			geom->addOffMeshConnection(m_hitPos, p, m_sample->getAgentRadius(), m_bidir ? 1 : 0, area, flags);
+			int Index = geom->addOffMeshConnection(m_hitPos, p, m_sample->getAgentRadius(), m_bidir ? 1 : 0, area, flags);
+
+			dtNavMesh* navMesh = m_sample->getNavMesh();
+			if (navMesh)
+			{
+				dtPolyRef conRef = navMesh->AddOffMeshConnection(m_hitPos, p, 0, true, area, 0);
+				navMesh->SetOffMeshConnectionFlags(conRef, flags);
+				geom->SetOffMeshRef(Index, conRef);// 记录下来，用于删除
+			}
+			
 			m_hitPosSet = false;
 		}
 	}

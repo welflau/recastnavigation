@@ -37,9 +37,18 @@ class dtQueryFilter
 	float m_areaCost[DT_MAX_AREAS];		///< Cost per area type. (Used by default implementation.)
 	unsigned short m_includeFlags;		///< Flags for polygons that can be visited. (Used by default implementation.)
 	unsigned short m_excludeFlags;		///< Flags for polygons that should not be visted. (Used by default implementation.)
-	
+	int m_TypeID;                       ///< Which type of navmesh is considered
 public:
 	dtQueryFilter();
+
+	dtQueryFilter(int typeID, unsigned int includeFlags, unsigned int excludeFlags)
+		: m_includeFlags(includeFlags),
+		m_excludeFlags(excludeFlags),
+		m_TypeID(typeID)
+	{
+		for (int i = 0; i < DT_MAX_AREAS; ++i)
+			m_areaCost[i] = 1.0f;
+	}
 	
 #ifdef DT_VIRTUAL_QUERYFILTER
 	virtual ~dtQueryFilter() { }
@@ -53,10 +62,20 @@ public:
 	virtual bool passFilter(const dtPolyRef ref,
 							const dtMeshTile* tile,
 							const dtPoly* poly) const;
+
+	// Returns true if the polygon is can visited.
+	// Params:
+	//  poly - (in) pointer to the polygon test.
+	virtual bool PassFilter(unsigned int flags) const;
 #else
 	bool passFilter(const dtPolyRef ref,
 					const dtMeshTile* tile,
 					const dtPoly* poly) const;
+	// Returns true if the polygon is can visited.
+	// Params:
+	//  poly - (in) pointer to the polygon test.
+	bool PassFilter(unsigned int flags) const;
+
 #endif
 
 	/// Returns cost to move from the beginning to the end of a line segment
@@ -73,15 +92,13 @@ public:
 	///  @param[in]		nextTile	The tile containing the next polygon. [opt]
 	///  @param[in]		nextPoly	The next polygon. [opt]
 #ifdef DT_VIRTUAL_QUERYFILTER
-	virtual float getCost(const float* pa, const float* pb,
-						  const dtPolyRef prevRef, const dtMeshTile* prevTile, const dtPoly* prevPoly,
-						  const dtPolyRef curRef, const dtMeshTile* curTile, const dtPoly* curPoly,
-						  const dtPolyRef nextRef, const dtMeshTile* nextTile, const dtPoly* nextPoly) const;
+	virtual float getCost(const dtNavMesh* nav, const float* pa, const float* pb, const dtPolyRef curRef) const;
+
+	virtual float GetAreaCost(const int i) const;
 #else
-	float getCost(const float* pa, const float* pb,
-				  const dtPolyRef prevRef, const dtMeshTile* prevTile, const dtPoly* prevPoly,
-				  const dtPolyRef curRef, const dtMeshTile* curTile, const dtPoly* curPoly,
-				  const dtPolyRef nextRef, const dtMeshTile* nextTile, const dtPoly* nextPoly) const;
+	float getCost(const dtNavMesh* nav, const float* pa, const float* pb, const dtPolyRef curRef) const;
+
+	float GetAreaCost(const int i) const;
 #endif
 
 	/// @name Getters and setters for the default implementation data.
@@ -115,6 +132,8 @@ public:
 	/// @param[in]		flags		The new flags.
 	inline void setExcludeFlags(const unsigned short flags) { m_excludeFlags = flags; }	
 
+	inline void SetTypeID(const int typeID) { m_TypeID = typeID; }
+	inline int GetTypeID() const { return m_TypeID; }
 	///@}
 
 };
@@ -512,6 +531,19 @@ private:
 	dtNavMeshQuery(const dtNavMeshQuery&);
 	dtNavMeshQuery& operator=(const dtNavMeshQuery&);
 	
+
+	// Returns height of the polygon at specified location.
+	// Params:
+	//  ref - (in) ref to the polygon.
+	//  pos[3] - (in) the point where to locate the height.
+	//  height - (out) height at the location.
+	// Returns: true if over polygon.
+	dtStatus GetPolyHeightLocal(dtPolyRef ref, const Vector3f& pos, float* height) const;
+
+
+	// Returns closest point on polygon.
+	void ClosestPointOnPolyInTileLocal(const dtMeshTile* tile, const dtPoly* poly, const dtPolyRef ref, const Vector3f& pos, Vector3f* closest) const;
+
 	/// Queries polygons within a tile.
 	void queryPolygonsInTile(const dtMeshTile* tile, const float* qmin, const float* qmax,
 							 const dtQueryFilter* filter, dtPolyQuery* query) const;
@@ -519,15 +551,14 @@ private:
 	/// Returns portal points between two polygons.
 	dtStatus getPortalPoints(dtPolyRef from, dtPolyRef to, float* left, float* right,
 							 unsigned char& fromType, unsigned char& toType) const;
-	dtStatus getPortalPoints(dtPolyRef from, const dtPoly* fromPoly, const dtMeshTile* fromTile,
-							 dtPolyRef to, const dtPoly* toPoly, const dtMeshTile* toTile,
-							 float* left, float* right) const;
+
+	dtStatus GetPortalPoints(dtPolyRef from, dtPolyRef to, float* left, float* right) const;
+	dtStatus GetPortalPoints(dtPolyRef from, dtPolyRef to, Vector3f* left, Vector3f* right) const;
 	
 	/// Returns edge mid point between two polygons.
 	dtStatus getEdgeMidPoint(dtPolyRef from, dtPolyRef to, float* mid) const;
-	dtStatus getEdgeMidPoint(dtPolyRef from, const dtPoly* fromPoly, const dtMeshTile* fromTile,
-							 dtPolyRef to, const dtPoly* toPoly, const dtMeshTile* toTile,
-							 float* mid) const;
+
+	dtStatus GetEdgeMidPoint(dtPolyRef from, dtPolyRef to, Vector3f& mid) const;
 	
 	// Appends vertex to a straight path
 	dtStatus appendVertex(const float* pos, const unsigned char flags, const dtPolyRef ref,

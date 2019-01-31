@@ -22,7 +22,6 @@
 #include "Sample.h"
 
 // Tool to create off-mesh connection for InputGeom
-
 class OffMeshConnectionTool : public SampleTool
 {
 	Sample* m_sample;
@@ -30,7 +29,7 @@ class OffMeshConnectionTool : public SampleTool
 	bool m_hitPosSet;
 	bool m_bidir;
 	unsigned char m_oldFlags;
-	
+
 public:
 	OffMeshConnectionTool();
 	~OffMeshConnectionTool();

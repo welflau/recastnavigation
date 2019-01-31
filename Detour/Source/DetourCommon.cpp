@@ -232,6 +232,106 @@ bool dtClosestHeightPointTriangle(const float* p, const float* a, const float* b
 	return false;
 }
 
+// 找到指定点在三角形中的最相近位置点
+void ClosestPtPointTriangle(float* dest, const float* p, const float* a, const float* b, const float* c)
+{
+	// Check if P in vertex region outside A
+// 	Vector3f ab = b - a;
+// 	Vector3f ac = c - a;
+// 	Vector3f ap = p - a;
+
+	float ab[3], ac[3], ap[3];
+	dtVsub(ab, b, a);
+	dtVsub(ac, c, a);
+	dtVsub(ap, p, a);
+
+	float d1 = dtVdot(ab, ap);
+	float d2 = dtVdot(ac, ap);
+	
+	if (d1 <= 0.0f && d2 <= 0.0f)
+	{
+		// barycentric coordinates (1,0,0)
+		//return a;
+		dtVcopy(dest, a);
+		return;
+	}
+
+	// Check if P in vertex region outside B
+	//Vector3f bp = p - b;
+	float bp[3];
+	dtVsub(bp, p, b);
+	float d3 = dtVdot(ab, bp);
+	float d4 = dtVdot(ac, bp);
+	if (d3 >= 0.0f && d4 <= d3)
+	{
+		// barycentric coordinates (0,1,0)
+		//return b;
+		dtVcopy(dest, b);
+		return;
+	}
+
+	// Check if P in edge region of AB, if so return projection of P onto AB
+	float vc = d1 * d4 - d3 * d2;
+	if (vc <= 0.0f && d1 >= 0.0f && d3 <= 0.0f)
+	{
+		// barycentric coordinates (1-v,v,0)
+		float v = d1 / (d1 - d3);
+// 		return a + v * ab;
+		dtVscale(dest, ab, v);
+		dtVadd(dest, a, dest);
+		return;
+	}
+
+	// Check if P in vertex region outside C
+	//Vector3f cp = p - c;
+	float cp[3];
+	dtVsub(cp, p, c);
+	float d5 = dtVdot(ab, cp);
+	float d6 = dtVdot(ac, cp);
+	if (d6 >= 0.0f && d5 <= d6)
+	{
+		// barycentric coordinates (0,0,1)
+		//return c;
+		dtVcopy(dest, c);
+		return;
+	}
+
+	// Check if P in edge region of AC, if so return projection of P onto AC
+	float vb = d5 * d2 - d1 * d6;
+	if (vb <= 0.0f && d2 >= 0.0f && d6 <= 0.0f)
+	{
+		// barycentric coordinates (1-w,0,w)
+		float w = d2 / (d2 - d6);
+		//return a + w * ac;
+		dtVscale(dest, ac, w);
+		dtVadd(dest, a, dest);
+		return;
+	}
+
+	// Check if P in edge region of BC, if so return projection of P onto BC
+	float va = d3 * d6 - d5 * d4;
+	if (va <= 0.0f && (d4 - d3) >= 0.0f && (d5 - d6) >= 0.0f)
+	{
+		// barycentric coordinates (0,1-w,w)
+		float w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+		//return Lerp(b, c, w);
+		dtVlerp(dest, b, c, w);
+		return;
+	}
+
+	// P inside face region. Compute Q through its barycentric coordinates (u,v,w)
+	float denom = 1.0f / (va + vb + vc);
+	float v = vb * denom;
+	float w = vc * denom;
+	//return a + (v * ab) + (w * ac);
+	float vab[3];
+	float wac[3];
+	dtVscale(vab, ab, v);
+	dtVscale(wac, ac, w);
+	dtVadd(dest, a, vab);
+	dtVadd(dest, wac, dest);
+}
+
 /// @par
 ///
 /// All points are projected onto the xz-plane, so the y-values are ignored.

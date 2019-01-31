@@ -33,6 +33,8 @@ enum DrawNavMeshFlags
 void duDebugDrawNavMesh(struct duDebugDraw* dd, const dtNavMesh& mesh, unsigned char flags);
 void duDebugDrawNavMeshWithClosedList(struct duDebugDraw* dd, const dtNavMesh& mesh, const dtNavMeshQuery& query, unsigned char flags);
 void duDebugDrawNavMeshNodes(struct duDebugDraw* dd, const dtNavMeshQuery& query);
+void duDebugDrawNavMeshLinks(struct duDebugDraw* dd, const dtNavMeshQuery& query, const dtNavMesh& mesh);
+void duDebugDrawLink(struct duDebugDraw* dd, const dtNavMesh& mesh, const dtPolyRef startRef, const dtPolyRef endRef);
 void duDebugDrawNavMeshBVTree(struct duDebugDraw* dd, const dtNavMesh& mesh);
 void duDebugDrawNavMeshPortals(struct duDebugDraw* dd, const dtNavMesh& mesh);
 void duDebugDrawNavMeshPolysWithFlags(struct duDebugDraw* dd, const dtNavMesh& mesh, const unsigned short polyFlags, const unsigned int col);

@@ -114,6 +114,7 @@ InputGeom::InputGeom() :
 	m_offMeshConCount(0),
 	m_volumeCount(0)
 {
+	memset(m_OffMeshConnects, 0, sizeof(dtPolyRef)*MAX_OMC_NUM);
 }
 
 InputGeom::~InputGeom()
@@ -420,7 +421,14 @@ static bool isectSegAABB(const float* sp, const float* sq,
 	
 	return true;
 }
+void InputGeom::getTilePos(const float* pos, int& tx, int& ty)
+{
+	const float* bmin = getNavMeshBoundsMin();
 
+	const float ts = m_buildSettings.tileSize*m_buildSettings.cellSize;
+	tx = (int)((pos[0] - bmin[0]) / ts);
+	ty = (int)((pos[2] - bmin[2]) / ts);
+}
 
 bool InputGeom::raycastMesh(float* src, float* dst, float& tmin)
 {
@@ -470,10 +478,10 @@ bool InputGeom::raycastMesh(float* src, float* dst, float& tmin)
 	return hit;
 }
 
-void InputGeom::addOffMeshConnection(const float* spos, const float* epos, const float rad,
+int InputGeom::addOffMeshConnection(const float* spos, const float* epos, const float rad,
 									 unsigned char bidir, unsigned char area, unsigned short flags)
 {
-	if (m_offMeshConCount >= MAX_OFFMESH_CONNECTIONS) return;
+	if (m_offMeshConCount >= MAX_OFFMESH_CONNECTIONS) return -1;
 	float* v = &m_offMeshConVerts[m_offMeshConCount*3*2];
 	m_offMeshConRads[m_offMeshConCount] = rad;
 	m_offMeshConDirs[m_offMeshConCount] = bidir;
@@ -482,7 +490,10 @@ void InputGeom::addOffMeshConnection(const float* spos, const float* epos, const
 	m_offMeshConId[m_offMeshConCount] = 1000 + m_offMeshConCount;
 	rcVcopy(&v[0], spos);
 	rcVcopy(&v[3], epos);
+	int result = m_offMeshConCount;
 	m_offMeshConCount++;
+
+	return result;
 }
 
 void InputGeom::deleteOffMeshConnection(int i)
@@ -496,6 +507,22 @@ void InputGeom::deleteOffMeshConnection(int i)
 	m_offMeshConDirs[i] = m_offMeshConDirs[m_offMeshConCount];
 	m_offMeshConAreas[i] = m_offMeshConAreas[m_offMeshConCount];
 	m_offMeshConFlags[i] = m_offMeshConFlags[m_offMeshConCount];
+}
+
+void InputGeom::SetOffMeshRef(int i, dtPolyRef ref)
+{
+	if (i < MAX_OMC_NUM && i >= 0)
+	{
+		m_OffMeshConnects[i] = ref;
+	}
+}
+
+dtPolyRef InputGeom::GetOffMeshRef(int i)
+{
+	if (i >= MAX_OMC_NUM && i < 0)
+		return 0;
+
+	return m_OffMeshConnects[i];
 }
 
 void InputGeom::drawOffMeshConnections(duDebugDraw* dd, bool hilight)

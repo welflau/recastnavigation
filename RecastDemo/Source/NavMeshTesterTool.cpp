@@ -131,10 +131,11 @@ static int fixupShortcuts(dtPolyRef* path, int npath, dtNavMeshQuery* navQuery)
 	const dtPoly* poly = 0;
 	if (dtStatusFailed(navQuery->getAttachedNavMesh()->getTileAndPolyByRef(path[0], &tile, &poly)))
 		return npath;
-	
-	for (unsigned int k = poly->firstLink; k != DT_NULL_LINK; k = tile->links[k].next)
+	const dtNavMesh* navMesh = navQuery->getAttachedNavMesh();
+	//for (unsigned int k = poly->firstLink; k != DT_NULL_LINK; k = tile->links[k].next)
+	for (const dtLink* link = navMesh->GetFirstLink(path[0]); link != NULL; link = navMesh->GetNextLink(link))
 	{
-		const dtLink* link = &tile->links[k];
+		//const dtLink* link = &tile->links[k];
 		if (link->ref != 0)
 		{
 			if (nneis < maxNeis)
@@ -686,7 +687,7 @@ void NavMeshTesterTool::recalc()
 		m_navQuery->findNearestPoly(m_spos, m_polyPickExt, &m_filter, &m_startRef, 0);
 	else
 		m_startRef = 0;
-	
+
 	if (m_eposSet)
 		m_navQuery->findNearestPoly(m_epos, m_polyPickExt, &m_filter, &m_endRef, 0);
 	else
@@ -716,6 +717,8 @@ void NavMeshTesterTool::recalc()
 				memcpy(polys, m_polys, sizeof(dtPolyRef)*m_npolys); 
 				int npolys = m_npolys;
 				
+
+				// 起点和终点在对应Poly上的最近坐标
 				float iterPos[3], targetPos[3];
 				m_navQuery->closestPointOnPoly(m_startRef, m_spos, iterPos, 0);
 				m_navQuery->closestPointOnPoly(polys[npolys-1], m_epos, targetPos, 0);
@@ -1066,7 +1069,9 @@ void NavMeshTesterTool::handleRender()
 	{
 		duDebugDrawNavMeshPoly(&dd, *m_navMesh, m_startRef, startCol);
 		duDebugDrawNavMeshPoly(&dd, *m_navMesh, m_endRef, endCol);
-		
+
+		//duDebugDrawLink(&dd, *m_navMesh, m_startRef, m_endRef); // LWF_TMP_T
+
 		if (m_npolys)
 		{
 			for (int i = 0; i < m_npolys; ++i)

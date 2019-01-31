@@ -43,6 +43,11 @@ void* dtAlloc(size_t size, dtAllocHint hint)
 	return sAllocFunc(size, hint);
 }
 
+void* dtRealloc(void* ptr, size_t size)
+{
+	return realloc(ptr, size);
+}
+
 void dtFree(void* ptr)
 {
 	if (ptr)

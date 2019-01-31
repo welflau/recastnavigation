@@ -58,4 +58,6 @@ void* dtAlloc(size_t size, dtAllocHint hint);
 /// @see dtAlloc
 void dtFree(void* ptr);
 
+void* dtRealloc(void* ptr, size_t size);
+
 #endif

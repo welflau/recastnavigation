@@ -26,7 +26,32 @@
 #include "DetourAlloc.h"
 #include "DetourAssert.h"
 #include <new>
+#include "AABB.h"
 
+static MinMaxAABB GetWorldTileBounds(const dtMeshTile& tile)
+{
+//	Assert(tile.header);
+
+	MinMaxAABB tileBounds(Vector3f(tile.header->bmin), Vector3f(tile.header->bmax));
+// 	if (tile.transformed)
+// 	{
+// 		Matrix4x4f mat;
+// 		mat.SetTR(tile.position, tile.rotation);
+// 		TransformAABBSlow(tileBounds, mat, tileBounds);
+// 	}
+	return tileBounds;
+}
+
+bool IntersectAABBAABB(const MinMaxAABB& A, const MinMaxAABB& B)
+{
+	bool overlap = true;
+
+	if (A.m_Min.x > B.m_Max.x || A.m_Max.x < B.m_Min.x) overlap = false;
+	if (A.m_Min.y > B.m_Max.y || A.m_Max.y < B.m_Min.y) overlap = false;
+	if (A.m_Min.z > B.m_Max.z || A.m_Max.x < B.m_Min.z) overlap = false;
+
+	return overlap;
+}
 
 inline bool overlapSlabs(const float* amin, const float* amax,
 						 const float* bmin, const float* bmax,
@@ -119,22 +144,6 @@ inline int computeTileHash(int x, int y, const int mask)
 	return (int)(n & mask);
 }
 
-inline unsigned int allocLink(dtMeshTile* tile)
-{
-	if (tile->linksFreeList == DT_NULL_LINK)
-		return DT_NULL_LINK;
-	unsigned int link = tile->linksFreeList;
-	tile->linksFreeList = tile->links[link].next;
-	return link;
-}
-
-inline void freeLink(dtMeshTile* tile, unsigned int link)
-{
-	tile->links[link].next = tile->linksFreeList;
-	tile->linksFreeList = link;
-}
-
-
 dtNavMesh* dtAllocNavMesh()
 {
 	void* mem = dtAlloc(sizeof(dtNavMesh), DT_ALLOC_PERM);
@@ -193,12 +202,14 @@ dtNavMesh::dtNavMesh() :
 	m_tileLutMask(0),
 	m_posLookup(0),
 	m_nextFree(0),
-	m_tiles(0)
+	m_tiles(0),
+	m_firstOffMeshConnection(DT_NULL_LINK)
 {
 #ifndef DT_POLYREF64
 	m_saltBits = 0;
 	m_tileBits = 0;
 	m_polyBits = 0;
+	m_polyTypeBits = 0;
 #endif
 	memset(&m_params, 0, sizeof(dtNavMeshParams));
 	m_orig[0] = 0;
@@ -208,17 +219,23 @@ dtNavMesh::dtNavMesh() :
 
 dtNavMesh::~dtNavMesh()
 {
+	dtFree(m_posLookup);
+
+	//for (int i = 0; i < m_tiles.Capacity(); ++i)//LWF_TMP
 	for (int i = 0; i < m_maxTiles; ++i)
 	{
-		if (m_tiles[i].flags & DT_TILE_FREE_DATA)
+		dtMeshTile* tile = &m_tiles[i];
+		if (!tile->header)
+			continue;
+		if (tile->flags &  DT_TILE_FREE_DATA)
 		{
-			dtFree(m_tiles[i].data);
-			m_tiles[i].data = 0;
-			m_tiles[i].dataSize = 0;
+			dtFree(tile->data);
+			tile->data = NULL;
+			tile->dataSize = 0;
 		}
+		dtFree(tile->polyLinks);
+		tile->polyLinks = NULL;
 	}
-	dtFree(m_posLookup);
-	dtFree(m_tiles);
 }
 		
 dtStatus dtNavMesh::init(const dtNavMeshParams* params)
@@ -227,7 +244,12 @@ dtStatus dtNavMesh::init(const dtNavMeshParams* params)
 	dtVcopy(m_orig, params->orig);
 	m_tileWidth = params->tileWidth;
 	m_tileHeight = params->tileHeight;
-	
+	m_cellSize = params->cellSize;
+	m_tileSize = params->tileSize;
+	m_agentHeight = params->agentHeight;
+	m_agentRadius = params->agentRadius;
+	m_agentMaxClimb = params->agentMaxClimb;
+
 	// Init tiles
 	m_maxTiles = params->maxTiles;
 	m_tileLutSize = dtNextPow2(params->maxTiles/4);
@@ -254,6 +276,7 @@ dtStatus dtNavMesh::init(const dtNavMeshParams* params)
 #ifndef DT_POLYREF64
 	m_tileBits = dtIlog2(dtNextPow2((unsigned int)params->maxTiles));
 	m_polyBits = dtIlog2(dtNextPow2((unsigned int)params->maxPolys));
+	m_polyTypeBits = 2;
 	// Only allow 31 salt bits, since the salt mask is calculated using 32bit uint and it will overflow.
 	m_saltBits = dtMin((unsigned int)31, 32 - m_tileBits - m_polyBits);
 
@@ -341,7 +364,8 @@ int dtNavMesh::findConnectingPolys(const float* va, const float* vb,
 			{
 				conarea[n*2+0] = dtMax(amin[0], bmin[0]);
 				conarea[n*2+1] = dtMin(amax[0], bmax[0]);
-				con[n] = base | (dtPolyRef)i;
+				//con[n] = base | (dtPolyRef)i;
+				con[n] = base | EncodeBasePolyId(DT_POLYTYPE_GROUND, i);
 				n++;
 			}
 			break;
@@ -350,37 +374,82 @@ int dtNavMesh::findConnectingPolys(const float* va, const float* vb,
 	return n;
 }
 
+// 去掉两个tile之间的Link
 void dtNavMesh::unconnectLinks(dtMeshTile* tile, dtMeshTile* target)
 {
 	if (!tile || !target) return;
 
-	const unsigned int targetNum = decodePolyIdTile(getTileRef(target));
+	const unsigned int targetNum = decodePolyIdTile(getTileRef(target)); // 目标Tile的ID
+	dtPolyRef base = getPolyRefBase(tile);
 
 	for (int i = 0; i < tile->header->polyCount; ++i)
 	{
 		dtPoly* poly = &tile->polys[i];
-		unsigned int j = poly->firstLink;
+		//unsigned int j = poly->firstLink;
+		unsigned int j = tile->polyLinks[i];
 		unsigned int pj = DT_NULL_LINK;
+		dtPolyRef polyRef = base | EncodeBasePolyId(DT_POLYTYPE_GROUND, i);
+
 		while (j != DT_NULL_LINK)
 		{
-			if (decodePolyIdTile(tile->links[j].ref) == targetNum)
+			const dtLink* link = GetLink(j);
+
+			//if (decodePolyIdTile(tile->links[j].ref) == targetNum)
+			if (decodePolyIdTile(link->ref) == targetNum)
 			{
+				// Remove link to this polygon
+				// 将从Link连接的Poly开始，到目标Poly之间的所有Link都删掉
+				RemoveLinkBetween(m_links[j].ref, polyRef);
+
 				// Remove link.
-				unsigned int nj = tile->links[j].next;
-				if (pj == DT_NULL_LINK)
-					poly->firstLink = nj;
-				else
-					tile->links[pj].next = nj;
-				freeLink(tile, j);
+ 				unsigned int nj = link->next;
+
+				const dtLink* Nlink = GetLink(nj);
+				if (Nlink)
+				{
+					dtAssert(Nlink->next != j);
+				}
+
+				m_links.Release(j);
 				j = nj;
 			}
 			else
 			{
 				// Advance
 				pj = j;
-				j = tile->links[j].next;
+				j = link->next;
 			}
 		}
+		tile->polyLinks[i] = DT_NULL_LINK; // 需要清空标志
+	}
+}
+
+// Removes all internal and external links from a tile.
+void dtNavMesh::UnconnectLinks(dtMeshTile* tile)
+{
+	dtAssert(tile);
+	dtAssert(tile->header);
+	dtAssert(tile->polyLinks);
+
+	dtPolyRef base = getPolyRefBase(tile);
+
+	// 遍历Tile中的所有Poly
+	for (int i = 0; i < tile->header->polyCount; ++i)
+	{
+		dtPolyRef polyRef = base | EncodeBasePolyId(DT_POLYTYPE_GROUND, i);
+
+		unsigned int j = tile->polyLinks[i];
+		while (j != DT_NULL_LINK)
+		{
+			unsigned int next = m_links[j].next;
+
+			// Remove link to this polygon
+			RemoveLinkBetween(m_links[j].ref, polyRef);
+
+			m_links.Release(j);
+			j = next;
+		}
+		tile->polyLinks[i] = DT_NULL_LINK;
 	}
 }
 
@@ -394,8 +463,6 @@ void dtNavMesh::connectExtLinks(dtMeshTile* tile, dtMeshTile* target, int side)
 		dtPoly* poly = &tile->polys[i];
 
 		// Create new links.
-//		unsigned short m = DT_EXT_LINK | (unsigned short)side;
-		
 		const int nv = poly->vertCount;
 		for (int j = 0; j < nv; ++j)
 		{
@@ -415,16 +482,20 @@ void dtNavMesh::connectExtLinks(dtMeshTile* tile, dtMeshTile* target, int side)
 			int nnei = findConnectingPolys(va,vb, target, dtOppositeTile(dir), nei,neia,4);
 			for (int k = 0; k < nnei; ++k)
 			{
-				unsigned int idx = allocLink(tile);
+				//unsigned int idx = allocLink(tile);
+				unsigned int idx = m_links.Alloc();
 				if (idx != DT_NULL_LINK)
 				{
-					dtLink* link = &tile->links[idx];
+					//dtLink* link = &tile->links[idx];
+					dtLink* link = &m_links[idx];
 					link->ref = nei[k];
 					link->edge = (unsigned char)j;
 					link->side = (unsigned char)dir;
 					
-					link->next = poly->firstLink;
-					poly->firstLink = idx;
+					// 构建一个新的Link节点，插入到Link链表头
+					dtAssert(idx != tile->polyLinks[i]);
+					link->next = tile->polyLinks[i];
+					tile->polyLinks[i] = idx;
 
 					// Compress portal limits to a byte value.
 					if (dir == 0 || dir == 4)
@@ -451,167 +522,245 @@ void dtNavMesh::connectExtLinks(dtMeshTile* tile, dtMeshTile* target, int side)
 	}
 }
 
-void dtNavMesh::connectExtOffMeshLinks(dtMeshTile* tile, dtMeshTile* target, int side)
+const dtLink* dtNavMesh::GetFirstLink(dtPolyRef ref) const
 {
-	if (!tile) return;
-	
-	// Connect off-mesh links.
-	// We are interested on links which land from target tile to this tile.
-	const unsigned char oppositeSide = (side == -1) ? 0xff : (unsigned char)dtOppositeTile(side);
-	
-	for (int i = 0; i < target->header->offMeshConCount; ++i)
+	if (DecodePolyIdType(ref) == DT_POLYTYPE_OFFMESH_CONNECTION) // OMC
 	{
-		dtOffMeshConnection* targetCon = &target->offMeshCons[i];
-		if (targetCon->side != oppositeSide)
-			continue;
-
-		dtPoly* targetPoly = &target->polys[targetCon->poly];
-		// Skip off-mesh connections which start location could not be connected at all.
-		if (targetPoly->firstLink == DT_NULL_LINK)
-			continue;
-		
-		const float halfExtents[3] = { targetCon->rad, target->header->walkableClimb, targetCon->rad };
-		
-		// Find polygon to connect to.
-		const float* p = &targetCon->pos[3];
-		float nearestPt[3];
-		dtPolyRef ref = findNearestPolyInTile(tile, p, halfExtents, nearestPt);
-		if (!ref)
-			continue;
-		// findNearestPoly may return too optimistic results, further check to make sure. 
-		if (dtSqr(nearestPt[0]-p[0])+dtSqr(nearestPt[2]-p[2]) > dtSqr(targetCon->rad))
-			continue;
-		// Make sure the location is on current mesh.
-		float* v = &target->verts[targetPoly->verts[1]*3];
-		dtVcopy(v, nearestPt);
-				
-		// Link off-mesh connection to target poly.
-		unsigned int idx = allocLink(target);
-		if (idx != DT_NULL_LINK)
-		{
-			dtLink* link = &target->links[idx];
-			link->ref = ref;
-			link->edge = (unsigned char)1;
-			link->side = oppositeSide;
-			link->bmin = link->bmax = 0;
-			// Add to linked list.
-			link->next = targetPoly->firstLink;
-			targetPoly->firstLink = idx;
-		}
-		
-		// Link target poly to off-mesh connection.
-		if (targetCon->flags & DT_OFFMESH_CON_BIDIR)
-		{
-			unsigned int tidx = allocLink(tile);
-			if (tidx != DT_NULL_LINK)
-			{
-				const unsigned short landPolyIdx = (unsigned short)decodePolyIdPoly(ref);
-				dtPoly* landPoly = &tile->polys[landPolyIdx];
-				dtLink* link = &tile->links[tidx];
-				link->ref = getPolyRefBase(target) | (dtPolyRef)(targetCon->poly);
-				link->edge = 0xff;
-				link->side = (unsigned char)(side == -1 ? 0xff : side);
-				link->bmin = link->bmax = 0;
-				// Add to linked list.
-				link->next = landPoly->firstLink;
-				landPoly->firstLink = tidx;
-			}
-		}
+		const dtOffMeshConnection* con = GetOffMeshConnection(ref);
+		if (con == NULL)
+			return NULL;
+		if (con->firstLink == DT_NULL_LINK)
+			return NULL;
+		return &m_links[con->firstLink];
 	}
+	else // 普通Poly
+	{
+		const dtMeshTile* tile = NULL;
+		const dtPoly* poly = NULL;
+		if (dtStatusFailed(getTileAndPolyByRef(ref, &tile, &poly)))
+			return NULL;
 
+		const unsigned int ip = GetPolyIndex(tile, poly);
+		const unsigned int firstLink = tile->polyLinks[ip];
+		if (firstLink == DT_NULL_LINK)
+			return NULL;
+		return &m_links[firstLink];
+	}
 }
 
 void dtNavMesh::connectIntLinks(dtMeshTile* tile)
 {
 	if (!tile) return;
 
+	const int polyCount = tile->header->polyCount;
+
+	// Allocate and nullify per poly links
+	if (tile->polyLinks) return;
+
+	// 申请一块PolyLinks数据内存
+	tile->polyLinks = (unsigned int*)dtAlloc(sizeof(unsigned int)*polyCount, DT_ALLOC_PERM);
+
+	for (int i = 0; i < polyCount; ++i)
+		tile->polyLinks[i] = DT_NULL_LINK; // 默认是没有Link的
+
+	// 0号Poly的ID
 	dtPolyRef base = getPolyRefBase(tile);
 
-	for (int i = 0; i < tile->header->polyCount; ++i)
+	// 遍历所有Poly
+	for (int i = 0; i < polyCount; ++i)
 	{
 		dtPoly* poly = &tile->polys[i];
-		poly->firstLink = DT_NULL_LINK;
 
-		if (poly->getType() == DT_POLYTYPE_OFFMESH_CONNECTION)
-			continue;
-			
 		// Build edge links backwards so that the links will be
 		// in the linked list from lowest index to highest.
-		for (int j = poly->vertCount-1; j >= 0; --j)
+		// 每个相邻边都有Link
+		for (int j = poly->vertCount - 1; j >= 0; --j)
 		{
 			// Skip hard and non-internal edges.
-			if (poly->neis[j] == 0 || (poly->neis[j] & DT_EXT_LINK)) continue;
+			if (poly->neis[j] == 0 || (poly->neis[j] & DT_EXT_LINK))
+				continue;
 
-			unsigned int idx = allocLink(tile);
+			unsigned int idx = m_links.Alloc();
 			if (idx != DT_NULL_LINK)
 			{
-				dtLink* link = &tile->links[idx];
-				link->ref = base | (dtPolyRef)(poly->neis[j]-1);
+				dtLink* link = &m_links[idx];
+				link->ref = base | EncodeBasePolyId(DT_POLYTYPE_GROUND, poly->neis[j] - 1); // 计算一遍PolyID Tile中的所有Poly都是Ground类型的
 				link->edge = (unsigned char)j;
 				link->side = 0xff;
 				link->bmin = link->bmax = 0;
 				// Add to linked list.
-				link->next = poly->firstLink;
-				poly->firstLink = idx;
+				//Assert(idx != tile->polyLinks[i]);
+				link->next = tile->polyLinks[i];
+				tile->polyLinks[i] = idx;
 			}
-		}			
+		}
 	}
 }
 
-void dtNavMesh::baseOffMeshLinks(dtMeshTile* tile)
-{
-	if (!tile) return;
-	
-	dtPolyRef base = getPolyRefBase(tile);
-	
-	// Base off-mesh connection start points.
-	for (int i = 0; i < tile->header->offMeshConCount; ++i)
-	{
-		dtOffMeshConnection* con = &tile->offMeshCons[i];
-		dtPoly* poly = &tile->polys[con->poly];
-	
-		const float halfExtents[3] = { con->rad, tile->header->walkableClimb, con->rad };
-		
-		// Find polygon to connect to.
-		const float* p = &con->pos[0]; // First vertex
-		float nearestPt[3];
-		dtPolyRef ref = findNearestPolyInTile(tile, p, halfExtents, nearestPt);
-		if (!ref) continue;
-		// findNearestPoly may return too optimistic results, further check to make sure. 
-		if (dtSqr(nearestPt[0]-p[0])+dtSqr(nearestPt[2]-p[2]) > dtSqr(con->rad))
-			continue;
-		// Make sure the location is on current mesh.
-		float* v = &tile->verts[poly->verts[0]*3];
-		dtVcopy(v, nearestPt);
 
-		// Link off-mesh connection to target poly.
-		unsigned int idx = allocLink(tile);
-		if (idx != DT_NULL_LINK)
+void dtNavMesh::ConnectOffMeshConnectionsToTile(dtMeshTile* tile)
+{
+	const MinMaxAABB tileBounds = GetWorldTileBounds(*tile);
+	const int agentTypeID = tile->header->userId;
+
+	for (unsigned int i = m_firstOffMeshConnection; i != DT_NULL_LINK; i = m_offMeshConnections[i].next)
+	{
+		dtOffMeshConnection& con = m_offMeshConnections[i];
+		if (con.agentTypeID != agentTypeID)
+			continue;
+		// TODO: it might be possible that adding a new tile allows the end point to be mapped closer.
+		//      if (con.endPoints[0].tileRef && con.endPoints[1].tileRef)
+		//          continue;
+		if (IntersectAABBAABB(con.bounds, tileBounds))
+			ConnectOffMeshConnection(i, m_agentRadius, m_agentMaxClimb);
+	}
+}
+
+// 两个Poly之间的Link都去掉
+void dtNavMesh::RemoveLinkBetween(dtPolyRef from, dtPolyRef to)
+{
+	if (DecodePolyIdType(from) == DT_POLYTYPE_OFFMESH_CONNECTION) // 起点Poly是 OMC类型的Poly
+	{
+		dtOffMeshConnection* con = GetOffMeshConnectionUnsafe(from);
+		if (con != NULL)
 		{
-			dtLink* link = &tile->links[idx];
-			link->ref = ref;
-			link->edge = (unsigned char)0;
-			link->side = 0xff;
-			link->bmin = link->bmax = 0;
-			// Add to linked list.
-			link->next = poly->firstLink;
-			poly->firstLink = idx;
+			// Remove link from connect polygon.
+			unsigned int k = con->firstLink; // OMC的第一个Link，
+			unsigned int pk = DT_NULL_LINK;
+			while (k != DT_NULL_LINK) // 遍历这个Link链条，找到目标Poly节点
+			{
+				if (m_links[k].ref == to)
+				{
+					unsigned int nk = m_links[k].next;
+					if (pk == DT_NULL_LINK)
+					{
+						con->firstLink = nk;
+					}
+					else
+					{
+						dtAssert(pk != nk);
+						m_links[pk].next = nk;
+					}
+					con->endPoints[m_links[k].edge].tileRef = 0;
+					m_links.Release(k);
+					break;
+				}
+				pk = k;
+				k = m_links[k].next;
+			}
+		}
+	}
+	else // 起点Poly是 普通Poly类型
+	{
+		const dtMeshTile* neiTile = NULL;
+		const dtPoly* neiPoly = NULL;
+		if (dtStatusSucceed(getTileAndPolyByRef(from, &neiTile, &neiPoly)))
+		{
+			// 删除所有与这个Poly相连的Link
+			// Remove link from connect polygon.
+			const unsigned int ip = GetPolyIndex(neiTile, neiPoly);
+			unsigned int k = neiTile->polyLinks[ip];
+			unsigned int pk = DT_NULL_LINK;
+			while (k != DT_NULL_LINK)
+			{
+				if (m_links[k].ref == to) // 直到终点Poly
+				{
+					unsigned int nk = m_links[k].next;
+					if (pk == DT_NULL_LINK)
+					{
+						neiTile->polyLinks[ip] = nk;
+					}
+					else
+					{
+						dtAssert(pk != nk);
+						m_links[pk].next = nk;
+					}
+					m_links.Release(k);
+					break;
+				}
+
+				const dtLink* Nlink = GetLink(m_links[k].next);
+				if (Nlink)
+				{
+					dtAssert(Nlink->next != k);
+				}
+
+				pk = k;
+				k = m_links[k].next;
+			}
+			neiTile->polyLinks[ip] = DT_NULL_LINK;
+		}
+	}
+}
+
+// 解除相连
+void dtNavMesh::UnconnectOffMeshConnectionsToTile(dtTileRef ref)
+{
+	// 由TileID获取Tile索引
+ 	const unsigned int tileIndex = DecodePolyIdTile((dtPolyRef)ref); // TileID 直接转Poly？
+
+	// 遍历OffMesh列表
+	for (unsigned int i = m_firstOffMeshConnection; i != DT_NULL_LINK; i = m_offMeshConnections[i].next)
+	{
+		dtOffMeshConnection& con = m_offMeshConnections[i];
+		const dtPolyRef ref = EncodeLinkId(con.salt, i);// 编码出一个LinkID
+
+		// OMC的两个连接点的Link
+		for (int j = 0; j < 2; j++)
+		{
+			if (con.endPoints[j].tileRef == 0)
+				continue;
+
+			// Remove links associated with the tile.
+			unsigned int k = con.firstLink;
+			while (k != DT_NULL_LINK)
+			{
+				unsigned int next = m_links[k].next;
+				unsigned int targetTileIndex = DecodePolyIdTile((dtPolyRef)m_links[k].ref);// 获取
+				if (targetTileIndex == tileIndex) // 找出当前Tile中的连接点，都要去掉
+				{
+					RemoveLinkBetween(ref, m_links[k].ref);
+					RemoveLinkBetween(m_links[k].ref, ref);
+				}
+				k = next;
+			}
+		}
+	}
+
+}
+
+void dtNavMesh::ClosestPointOnPolyInTileLocal(const dtMeshTile* tile, const dtPoly* poly,
+	const float* pos, float* closest) const
+{
+	// 获取Poly的在Tile中索引下标
+	const unsigned int ip = GetPolyIndex(tile, poly);
+	const dtPolyDetail* pd = &tile->detailMeshes[ip];
+
+	float closestDistSqr = FLT_MAX;
+
+	// 遍历detailMesh的所有三角面片，找出最近的面片中的点
+	for (int j = 0; j < pd->triCount; ++j)
+	{
+		const unsigned char* t = &tile->detailTris[(pd->triBase + j) * 4];
+		float* v[3]; // DetailMesh顶点列表 三角形的3个顶点 
+
+		// 遍历3个分量 取出顶点数据
+		for (int k = 0; k < 3; ++k)
+		{
+			if (t[k] < poly->vertCount) // 下标在低模的顶点范围内
+				v[k] = &tile->verts[poly->verts[t[k]]];
+			else
+				v[k] = &tile->detailVerts[pd->vertBase + (t[k] - poly->vertCount)];
 		}
 
-		// Start end-point is always connect back to off-mesh connection. 
-		unsigned int tidx = allocLink(tile);
-		if (tidx != DT_NULL_LINK)
+		float pt[3];
+		ClosestPtPointTriangle(pt,pos, v[0], v[1], v[2]); // 找到三角形中最接近的点
+
+		const float d = dtVdist(pos, pt);
+		if (d < closestDistSqr)
 		{
-			const unsigned short landPolyIdx = (unsigned short)decodePolyIdPoly(ref);
-			dtPoly* landPoly = &tile->polys[landPolyIdx];
-			dtLink* link = &tile->links[tidx];
-			link->ref = base | (dtPolyRef)(con->poly);
-			link->edge = 0xff;
-			link->side = 0xff;
-			link->bmin = link->bmax = 0;
-			// Add to linked list.
-			link->next = landPoly->firstLink;
-			landPoly->firstLink = tidx;
+			dtVcopy(closest, pt);
+			closestDistSqr = d;
 		}
 	}
 }
@@ -623,7 +772,7 @@ void dtNavMesh::closestPointOnPoly(dtPolyRef ref, const float* pos, float* close
 	getTileAndPolyByRefUnsafe(ref, &tile, &poly);
 	
 	// Off-mesh connections don't have detail polygons.
-	if (poly->getType() == DT_POLYTYPE_OFFMESH_CONNECTION)
+	if (DecodePolyIdType(ref) != DT_POLYTYPE_OFFMESH_CONNECTION)
 	{
 		const float* v0 = &tile->verts[poly->verts[0]*3];
 		const float* v1 = &tile->verts[poly->verts[1]*3];
@@ -695,6 +844,116 @@ void dtNavMesh::closestPointOnPoly(dtPolyRef ref, const float* pos, float* close
 	}
 }
 
+
+
+void dtNavMesh::QueryPolygonsInTile(const dtMeshTile* tile, const Vector3f& center, const Vector3f& extents, NavMeshProcessCallback* callback) const
+{
+	Vector3f minPos = center - extents;
+	Vector3f maxPos = center + extents;
+
+	// Get nearby polygons from proximity grid.
+	dtPolyRef polyRefs[128];
+	dtPoly* polys[128];
+	int n = queryPolygonsInTile(tile, minPos.GetPtr(), maxPos.GetPtr(), polyRefs, polys, 128, callback);
+}
+
+// 根据包围盒找到相应的Poly
+void dtNavMesh::QueryPolygons(int typeID, const Vector3f& center, const Vector3f& extents,
+	NavMeshProcessCallback* callback) const
+{
+	// 包围盒
+	float bmin[3], bmax[3];
+	dtVsub(bmin, center.GetPtr(), extents.GetPtr());
+	dtVadd(bmax, center.GetPtr(), extents.GetPtr());
+
+	// Find tiles the query touches.
+	int minx, miny, maxx, maxy;
+	calcTileLoc(bmin, &minx, &miny);
+	calcTileLoc(bmax, &maxx, &maxy);
+
+	// 获取当前坐标下的所有Layer的Tile
+	static const int MAX_NEIS = 32;
+	dtMeshTile* neis[MAX_NEIS];
+
+	for (int y = miny; y <= maxy; ++y)
+	{
+		for (int x = minx; x <= maxx; ++x)
+		{
+
+			//int nneis;
+
+			// Connect with layers in current tile.
+			//nneis = getTilesAt(i, j, neis, MAX_NEIS);
+			const int nneis = getTilesAt(x, y, neis, MAX_NEIS);
+			for (int n = 0; n < nneis; ++n)
+			{
+				QueryPolygonsInTile(neis[n], center, extents, callback);
+			}
+		}
+	}
+
+}
+
+// 找到
+dtPolyRef dtNavMesh::FindNearestPoly(int typeID, const Vector3f& center, const Vector3f& extents, Vector3f* nearestPt) const
+{
+	struct NearestQuery : public NavMeshProcessCallback
+	{
+		const dtNavMesh* m_NavMesh;
+		dtPolyRef m_PolyRef;
+		float m_DistanceSqr;
+		const Vector3f m_Center;
+		Vector3f m_Point;
+
+		inline NearestQuery(const dtNavMesh* navmesh, const Vector3f& center)
+			: m_NavMesh(navmesh), m_PolyRef(0), m_DistanceSqr(FLT_MAX)
+			, m_Center(center), m_Point(0.0f, 0.0f, 0.0f)
+		{
+
+		}
+
+		virtual void ProcessPolygons(const dtMeshTile* tile, const dtPolyRef* polyRefs, dtPoly** polys, const int itemCount)
+		{
+			float localPosition[3];
+			//const Vector3f localPosition = WorldToTile(*tile, m_Center);
+			WorldToTile(*tile, m_Center.GetPtr(), localPosition);
+			// Find nearest polygon amongst the nearby polygons.
+			for (int i = 0; i < itemCount; ++i)
+			{
+				dtPolyRef ref = polyRefs[i];
+				const dtPoly* poly = polys[i];
+				//Vector3f closestPtPoly;
+				float closestPtPoly[3];
+				m_NavMesh->ClosestPointOnPolyInTileLocal(tile, poly, localPosition, closestPtPoly); // 找到Poly中最近的点
+				const float d = dtVdist(localPosition, closestPtPoly);
+				if (d < m_DistanceSqr)
+				{
+					m_Point = Vector3f(closestPtPoly);
+					m_DistanceSqr = d;
+					m_PolyRef = ref;
+				}
+			}
+		}
+	};
+
+	// Get nearby polygons from proximity grid.
+	NearestQuery nearest(this, center);
+	QueryPolygons(typeID, center, extents, &nearest);
+
+	if (nearest.m_PolyRef == 0)
+		return 0;
+
+	if (nearestPt)
+	{
+		// 根据Poly找到Tile
+		const dtMeshTile* tile = getTileByRef(nearest.m_PolyRef);
+		if (tile)
+			*nearestPt = TileToWorld(*tile, nearest.m_Point);
+	}
+
+	return nearest.m_PolyRef;
+}
+
 dtPolyRef dtNavMesh::findNearestPolyInTile(const dtMeshTile* tile,
 										   const float* center, const float* halfExtents,
 										   float* nearestPt) const
@@ -704,15 +963,16 @@ dtPolyRef dtNavMesh::findNearestPolyInTile(const dtMeshTile* tile,
 	dtVadd(bmax, center, halfExtents);
 	
 	// Get nearby polygons from proximity grid.
-	dtPolyRef polys[128];
-	int polyCount = queryPolygonsInTile(tile, bmin, bmax, polys, 128);
+	dtPolyRef polyRefs[128];
+	dtPoly* polys[128];
+	int polyCount = queryPolygonsInTile(tile, bmin, bmax, polyRefs, polys, 128,NULL);
 	
 	// Find nearest polygon amongst the nearby polygons.
 	dtPolyRef nearest = 0;
 	float nearestDistanceSqr = FLT_MAX;
 	for (int i = 0; i < polyCount; ++i)
 	{
-		dtPolyRef ref = polys[i];
+		dtPolyRef ref = polyRefs[i];
 		float closestPtPoly[3];
 		float diff[3];
 		bool posOverPoly = false;
@@ -744,7 +1004,7 @@ dtPolyRef dtNavMesh::findNearestPolyInTile(const dtMeshTile* tile,
 }
 
 int dtNavMesh::queryPolygonsInTile(const dtMeshTile* tile, const float* qmin, const float* qmax,
-								   dtPolyRef* polys, const int maxPolys) const
+	dtPolyRef* polyRefs, dtPoly** polys, const int maxPolys, NavMeshProcessCallback* callback) const
 {
 	if (tile->bvTree)
 	{
@@ -782,7 +1042,11 @@ int dtNavMesh::queryPolygonsInTile(const dtMeshTile* tile, const float* qmin, co
 			if (isLeafNode && overlap)
 			{
 				if (n < maxPolys)
-					polys[n++] = base | (dtPolyRef)node->i;
+				{ 
+					polyRefs[n] = base | EncodeBasePolyId(DT_POLYTYPE_GROUND, node->i);
+					polys[n] = &tile->polys[node->i];
+					n++;
+				}
 			}
 			
 			if (overlap || isLeafNode)
@@ -793,7 +1057,9 @@ int dtNavMesh::queryPolygonsInTile(const dtMeshTile* tile, const float* qmin, co
 				node += escapeIndex;
 			}
 		}
-		
+		if (n > 0 && callback)
+			callback->ProcessPolygons(tile, polyRefs, polys, n);
+
 		return n;
 	}
 	else
@@ -804,9 +1070,6 @@ int dtNavMesh::queryPolygonsInTile(const dtMeshTile* tile, const float* qmin, co
 		for (int i = 0; i < tile->header->polyCount; ++i)
 		{
 			dtPoly* p = &tile->polys[i];
-			// Do not return off-mesh connection polygons.
-			if (p->getType() == DT_POLYTYPE_OFFMESH_CONNECTION)
-				continue;
 			// Calc polygon bounds.
 			const float* v = &tile->verts[p->verts[0]*3];
 			dtVcopy(bmin, v);
@@ -820,11 +1083,260 @@ int dtNavMesh::queryPolygonsInTile(const dtMeshTile* tile, const float* qmin, co
 			if (dtOverlapBounds(qmin,qmax, bmin,bmax))
 			{
 				if (n < maxPolys)
-					polys[n++] = base | (dtPolyRef)i;
+				{
+					polyRefs[n] = base | EncodeBasePolyId(DT_POLYTYPE_GROUND, i);
+					polys[n] = p;
+					n++;
+				}
 			}
 		}
+		if (n > 0 && callback)
+			callback->ProcessPolygons(tile, polyRefs, polys, n);
 		return n;
 	}
+}
+
+static bool TestPointInCylinder(const float* point, const float* center, const float halfHeight, const float radius)
+{
+	if (dtMathSqrtf(point[0] - center[0]) + dtMathSqrtf(point[2] - center[2]) > dtMathSqrtf(radius))
+		return false;
+	return dtMathFabsf(point[1] - center[1]) <= halfHeight;
+}
+
+// 查找OMC周围的Link点的Poly
+void dtNavMesh::ConnectOffMeshConnection(unsigned int index, float connectRadius, float connectHeight)
+{
+	dtOffMeshConnection& con = m_offMeshConnections[index];
+	const dtPolyRef conRef = EncodeLinkId(con.salt, index);
+
+	if (con.width > 0.0f)
+	{
+
+	}
+	else
+	{
+		// Point-to-point connection 点到点
+		const float ext[3] = { connectRadius, connectHeight, connectRadius };
+
+		// Link的 末端两点
+		for (int i = 0; i < 2; i++)
+		{
+			if (con.endPoints[i].tileRef)
+				continue;
+			//const Vector3f searchPos = con.endPoints[i].pos;
+			float searchPos[3];
+			dtVcopy(searchPos, con.endPoints[i].pos);
+
+			//Vector3f mappedPos;
+			//const NavMeshPolyRef mappedRef = FindNearestPoly(con.agentTypeID, searchPos, ext, &mappedPos);
+		
+			// 找到OMC两个末端引脚所在的Poly，这里就没有Tile了，需要根据坐标找到Tile，找到最近的点
+			Vector3f mappedPos;
+			dtPolyRef mappedRef = FindNearestPoly(con.agentTypeID, Vector3f(searchPos), Vector3f(ext), &mappedPos);
+			if (!mappedRef)
+				continue;
+
+			// 测试一下得到的点是否在 OMC的盒子范围
+// 			if (!TestPointInCylinder(mappedPos.GetPtr(), searchPos, connectHeight, connectRadius))
+// 				continue;
+
+			// 获取Poly和Tile
+			const dtMeshTile* mappedTile = NULL;
+			const dtPoly* mappedPoly = NULL;
+
+ 			if (dtStatusFailed(getTileAndPolyByRef(mappedRef, &mappedTile, &mappedPoly)))
+ 				continue;
+
+			con.endPoints[i].mapped[0] = con.endPoints[i].mapped[1] = mappedPos;
+			con.endPoints[i].tileRef = mappedRef;
+
+			// Link off-mesh connection to target poly.
+			unsigned int idx = m_links.Alloc();
+			if (idx != DT_NULL_LINK)
+			{
+				dtLink* link = &m_links[idx];
+				link->ref = mappedRef;
+				link->edge = (unsigned char)i;
+				link->side = 0xff;
+				link->bmin = link->bmax = 0;
+				// Add to linked list.
+	 			dtAssert(idx != con.firstLink);
+				link->next = con.firstLink;
+				con.firstLink = idx;
+			}
+
+			// Start end-point is always connect back to off-mesh connection,
+			// Destination end-point only if it is bidirectional link.
+			if (i == 0 || (i == 1 && (con.linkDirection & kLinkDirectionTwoWay))) //双向
+			{
+				// Link target poly to off-mesh connection.
+				unsigned int idx = m_links.Alloc();
+				if (idx != DT_NULL_LINK)
+				{
+					dtLink* link = &m_links[idx];
+					link->ref = conRef;
+					link->edge = (unsigned char)i;
+					link->side = 0xff;
+					link->bmin = link->bmax = 0;
+
+					// Add to linked list.
+					const unsigned int ip = GetPolyIndex(mappedTile, mappedPoly);
+	 				dtAssert(idx != mappedTile->polyLinks[ip]);
+					link->next = mappedTile->polyLinks[ip];
+					mappedTile->polyLinks[ip] = idx;
+				}
+			}
+		}
+	}
+
+
+
+}
+
+dtPolyRef dtNavMesh::AddOffMeshConnection(const float* spos, const float* epos, int instanceID, bool twoWay, unsigned char areaType, int agentTypeID)
+{
+	
+	OffMeshConnectionParams conn;
+	dtVcopy(conn.startPos, spos);
+	dtVcopy(conn.endPos, epos);
+	conn.up = Vector3f(0, 1, 0);
+	conn.width = 0.0f;
+	conn.costModifier = -1.0f;
+	conn.linkDirection = twoWay ? kLinkDirectionTwoWay : kLinkDirectionOneWay;
+	conn.flags = 1 << areaType;
+	conn.area = areaType;
+	conn.linkType = static_cast<unsigned short>(kLinkTypeManual);
+	conn.userID = instanceID;
+	conn.agentTypeID = agentTypeID;
+
+	const Vector3f query = Vector3f(m_agentRadius, m_agentMaxClimb, m_agentRadius);
+
+	return AddOffMeshConnection(&conn, query.x, query.y);
+}
+
+dtPolyRef dtNavMesh::AddOffMeshConnection(const struct OffMeshConnectionParams* params, float connectRadius, float connectHeight)
+{
+	unsigned int index = m_offMeshConnections.Alloc();
+	dtOffMeshConnection& con = m_offMeshConnections[index];
+
+	// Retain salt.
+	unsigned int salt = con.salt;
+	memset(&con, 0, sizeof(con));
+	con.salt = salt;
+
+
+	// Add to active off-mesh connection list. 链表头
+	con.next = m_firstOffMeshConnection;
+	m_firstOffMeshConnection = index;
+
+	// fill out connection struct
+	dtVcopy(con.endPoints[0].pos, params->startPos);
+	dtVcopy(con.endPoints[1].pos, params->endPos);
+
+	float r[3];
+	dtVsub(r, params->endPos, params->startPos);
+
+	Vector3f dir = NormalizeSafe(Vector3f(r));
+	if (Magnitude(dir) < 0.00001f)
+		dir = Vector3f(0, 0, 1);
+
+	con.axisY = params->up;
+	con.axisX = Cross(con.axisY, dir);
+	con.axisZ = Cross(con.axisX, con.axisY);
+	con.width = params->width;
+	con.costModifier = params->costModifier;
+	con.linkDirection = params->linkDirection;
+	con.flags = params->flags;
+	con.area = params->area;
+	con.linkType = params->linkType;
+	con.userId = params->userID;
+	con.agentTypeID = params->agentTypeID;
+
+	// 包围盒计算
+	con.bounds.Init();
+	if (con.width > 0.0f) // 有宽度的OMC
+	{
+		const Vector3f extent = NormalizeSafe(con.axisX) * con.width * 0.5f;
+		con.bounds.Encapsulate(con.endPoints[0].pos - extent);
+		con.bounds.Encapsulate(con.endPoints[0].pos + extent);
+		con.bounds.Encapsulate(con.endPoints[1].pos - extent);
+		con.bounds.Encapsulate(con.endPoints[1].pos + extent);
+	}
+	else
+	{
+		con.bounds.Encapsulate(con.endPoints[0].pos);
+		con.bounds.Encapsulate(con.endPoints[1].pos);
+	}
+
+	con.firstLink = DT_NULL_LINK;
+
+	const dtPolyRef dynRef = EncodeLinkId(con.salt, index);// 编码OMC
+
+	// Connect 建立Link列表
+	ConnectOffMeshConnection(index, connectRadius, connectHeight);
+
+	return dynRef;
+}
+
+void dtNavMesh::UnconnectOffMeshConnection(unsigned int index)
+{
+	// Remove links
+	dtOffMeshConnection& con = m_offMeshConnections[index];
+	const dtPolyRef ref = EncodeLinkId(con.salt, index);
+	unsigned int i = con.firstLink;
+	while (i != DT_NULL_LINK)
+	{
+		unsigned int next = m_links[i].next;
+		RemoveLinkBetween(m_links[i].ref, ref);
+		m_links.Release(i);
+		i = next;
+	}
+	con.firstLink = DT_NULL_LINK;
+}
+
+dtStatus dtNavMesh::RemoveOffMeshConnection(const dtPolyRef ref)
+{
+	if (DecodePolyIdType(ref) != DT_POLYTYPE_OFFMESH_CONNECTION)
+		return DT_FAILURE | DT_INVALID_PARAM;
+
+	unsigned int index = DecodePolyIdPoly(ref);
+	if (index >= m_offMeshConnections.Capacity())
+		return DT_FAILURE | DT_INVALID_PARAM;
+
+	unsigned int salt = DecodePolyIdSalt(ref);
+	if (salt != m_offMeshConnections[index].salt)
+		return DT_FAILURE | DT_INVALID_PARAM;
+
+	// Remove links
+	UnconnectOffMeshConnection(index);
+
+	// Find previous offmesh link to be able to remove from the list.
+	unsigned int i = m_firstOffMeshConnection;
+	unsigned int prev = DT_NULL_LINK;
+	while (i != DT_NULL_LINK)
+	{
+		if (i == index)
+			break;
+		prev = i;
+		i = m_offMeshConnections[i].next;
+	}
+	// Remove from linked list
+	const unsigned int next = m_offMeshConnections[index].next;
+	if (prev == DT_NULL_LINK)
+		m_firstOffMeshConnection = next;
+	else
+		m_offMeshConnections[prev].next = next;
+
+	// Bump salt to distiguish deleted connections.
+	m_offMeshConnections[index].salt++;
+	if (m_offMeshConnections[index].salt == 0)
+		m_offMeshConnections[index].salt = 1;
+
+	m_offMeshConnections.Release(index);
+
+	//BumpTimeStamp();
+
+	return DT_SUCCESS;
 }
 
 /// @par
@@ -846,6 +1358,7 @@ int dtNavMesh::queryPolygonsInTile(const dtMeshTile* tile, const float* qmin, co
 dtStatus dtNavMesh::addTile(unsigned char* data, int dataSize, int flags,
 							dtTileRef lastRef, dtTileRef* result)
 {
+	// 检查格式，通过Header数据检查
 	// Make sure the data is in right format.
 	dtMeshHeader* header = (dtMeshHeader*)data;
 	if (header->magic != DT_NAVMESH_MAGIC)
@@ -871,7 +1384,7 @@ dtStatus dtNavMesh::addTile(unsigned char* data, int dataSize, int flags,
 	else
 	{
 		// Try to relocate the tile to specific index with same salt.
-		int tileIndex = (int)decodePolyIdTile((dtPolyRef)lastRef);
+		int tileIndex = (int)DecodePolyIdTile((dtPolyRef)lastRef);
 		if (tileIndex >= m_maxTiles)
 			return DT_FAILURE | DT_OUT_OF_MEMORY;
 		// Try to find the specific tile id from the free list.
@@ -893,7 +1406,7 @@ dtStatus dtNavMesh::addTile(unsigned char* data, int dataSize, int flags,
 			prev->next = tile->next;
 
 		// Restore salt.
-		tile->salt = decodePolyIdSalt((dtPolyRef)lastRef);
+		tile->salt = DecodePolyIdSalt((dtPolyRef)lastRef);
 	}
 
 	// Make sure we could allocate a tile.
@@ -909,32 +1422,22 @@ dtStatus dtNavMesh::addTile(unsigned char* data, int dataSize, int flags,
 	const int headerSize = dtAlign4(sizeof(dtMeshHeader));
 	const int vertsSize = dtAlign4(sizeof(float)*3*header->vertCount);
 	const int polysSize = dtAlign4(sizeof(dtPoly)*header->polyCount);
-	const int linksSize = dtAlign4(sizeof(dtLink)*(header->maxLinkCount));
 	const int detailMeshesSize = dtAlign4(sizeof(dtPolyDetail)*header->detailMeshCount);
 	const int detailVertsSize = dtAlign4(sizeof(float)*3*header->detailVertCount);
 	const int detailTrisSize = dtAlign4(sizeof(unsigned char)*4*header->detailTriCount);
 	const int bvtreeSize = dtAlign4(sizeof(dtBVNode)*header->bvNodeCount);
-	const int offMeshLinksSize = dtAlign4(sizeof(dtOffMeshConnection)*header->offMeshConCount);
 	
 	unsigned char* d = data + headerSize;
 	tile->verts = dtGetThenAdvanceBufferPointer<float>(d, vertsSize);
 	tile->polys = dtGetThenAdvanceBufferPointer<dtPoly>(d, polysSize);
-	tile->links = dtGetThenAdvanceBufferPointer<dtLink>(d, linksSize);
 	tile->detailMeshes = dtGetThenAdvanceBufferPointer<dtPolyDetail>(d, detailMeshesSize);
 	tile->detailVerts = dtGetThenAdvanceBufferPointer<float>(d, detailVertsSize);
 	tile->detailTris = dtGetThenAdvanceBufferPointer<unsigned char>(d, detailTrisSize);
 	tile->bvTree = dtGetThenAdvanceBufferPointer<dtBVNode>(d, bvtreeSize);
-	tile->offMeshCons = dtGetThenAdvanceBufferPointer<dtOffMeshConnection>(d, offMeshLinksSize);
 
 	// If there are no items in the bvtree, reset the tree pointer.
 	if (!bvtreeSize)
 		tile->bvTree = 0;
-
-	// Build links freelist
-	tile->linksFreeList = 0;
-	tile->links[header->maxLinkCount-1].next = DT_NULL_LINK;
-	for (int i = 0; i < header->maxLinkCount-1; ++i)
-		tile->links[i].next = i+1;
 
 	// Init tile.
 	tile->header = header;
@@ -943,10 +1446,6 @@ dtStatus dtNavMesh::addTile(unsigned char* data, int dataSize, int flags,
 	tile->flags = flags;
 
 	connectIntLinks(tile);
-
-	// Base off-mesh connections to their starting polygons and connect connections inside the tile.
-	baseOffMeshLinks(tile);
-	connectExtOffMeshLinks(tile, tile, -1);
 
 	// Create connections with neighbour tiles.
 	static const int MAX_NEIS = 32;
@@ -962,8 +1461,6 @@ dtStatus dtNavMesh::addTile(unsigned char* data, int dataSize, int flags,
 	
 		connectExtLinks(tile, neis[j], -1);
 		connectExtLinks(neis[j], tile, -1);
-		connectExtOffMeshLinks(tile, neis[j], -1);
-		connectExtOffMeshLinks(neis[j], tile, -1);
 	}
 	
 	// Connect with neighbour tiles.
@@ -974,10 +1471,10 @@ dtStatus dtNavMesh::addTile(unsigned char* data, int dataSize, int flags,
 		{
 			connectExtLinks(tile, neis[j], i);
 			connectExtLinks(neis[j], tile, dtOppositeTile(i));
-			connectExtOffMeshLinks(tile, neis[j], i);
-			connectExtOffMeshLinks(neis[j], tile, dtOppositeTile(i));
 		}
 	}
+
+	ConnectOffMeshConnectionsToTile(tile);
 	
 	if (result)
 		*result = getTileRef(tile);
@@ -1094,8 +1591,8 @@ const dtMeshTile* dtNavMesh::getTileByRef(dtTileRef ref) const
 {
 	if (!ref)
 		return 0;
-	unsigned int tileIndex = decodePolyIdTile((dtPolyRef)ref);
-	unsigned int tileSalt = decodePolyIdSalt((dtPolyRef)ref);
+	unsigned int tileIndex = DecodePolyIdTile((dtPolyRef)ref);
+	unsigned int tileSalt = DecodePolyIdSalt((dtPolyRef)ref);
 	if ((int)tileIndex >= m_maxTiles)
 		return 0;
 	const dtMeshTile* tile = &m_tiles[tileIndex];
@@ -1127,16 +1624,33 @@ void dtNavMesh::calcTileLoc(const float* pos, int* tx, int* ty) const
 
 dtStatus dtNavMesh::getTileAndPolyByRef(const dtPolyRef ref, const dtMeshTile** tile, const dtPoly** poly) const
 {
-	if (!ref) return DT_FAILURE;
-	unsigned int salt, it, ip;
-	decodePolyId(ref, salt, it, ip);
-	if (it >= (unsigned int)m_maxTiles) return DT_FAILURE | DT_INVALID_PARAM;
-	if (m_tiles[it].salt != salt || m_tiles[it].header == 0) return DT_FAILURE | DT_INVALID_PARAM;
-	if (ip >= (unsigned int)m_tiles[it].header->polyCount) return DT_FAILURE | DT_INVALID_PARAM;
-	*tile = &m_tiles[it];
-	*poly = &m_tiles[it].polys[ip];
+	if (!ref)
+		return DT_FAILURE;
+	unsigned int salt, it, type, ip;
+	DecodePolyId(&salt, &it, &type, &ip, ref); // 解码出来tile type poly
+
+	if (it >= (unsigned int)m_maxTiles)
+		return DT_FAILURE | DT_INVALID_PARAM;
+	if (m_tiles[it].salt != salt /*|| m_tiles[it].header == 0*/)
+		return DT_FAILURE | DT_INVALID_PARAM;
+	if (type == DT_POLYTYPE_OFFMESH_CONNECTION)
+	{
+		*tile = 0;
+		*poly = 0;
+	}
+	else
+	{
+		if ( m_tiles[it].header == 0 )
+			return DT_FAILURE | DT_INVALID_PARAM;
+
+		if (ip >= (unsigned int)m_tiles[it].header->polyCount)
+			return DT_FAILURE | DT_INVALID_PARAM;
+		*tile = &m_tiles[it];
+		*poly = &m_tiles[it].polys[ip];
+	}
 	return DT_SUCCESS;
 }
+
 
 /// @par
 ///
@@ -1145,20 +1659,43 @@ dtStatus dtNavMesh::getTileAndPolyByRef(const dtPolyRef ref, const dtMeshTile** 
 /// it does not validate the reference.
 void dtNavMesh::getTileAndPolyByRefUnsafe(const dtPolyRef ref, const dtMeshTile** tile, const dtPoly** poly) const
 {
-	unsigned int salt, it, ip;
-	decodePolyId(ref, salt, it, ip);
-	*tile = &m_tiles[it];
-	*poly = &m_tiles[it].polys[ip];
+	unsigned int salt, it, type, ip;
+	DecodePolyId(&salt, &it, &type, &ip, ref);
+	if (type == DT_POLYTYPE_OFFMESH_CONNECTION)
+	{
+		*tile = 0;
+		*poly = 0;
+	}
+	else
+	{
+		*tile = &m_tiles[it];
+		*poly = &m_tiles[it].polys[ip];
+	}
 }
 
 bool dtNavMesh::isValidPolyRef(dtPolyRef ref) const
 {
-	if (!ref) return false;
-	unsigned int salt, it, ip;
-	decodePolyId(ref, salt, it, ip);
-	if (it >= (unsigned int)m_maxTiles) return false;
-	if (m_tiles[it].salt != salt || m_tiles[it].header == 0) return false;
-	if (ip >= (unsigned int)m_tiles[it].header->polyCount) return false;
+	if (!ref)
+		return false;
+	unsigned int salt, it, type, ip;
+	DecodePolyId(&salt, &it, &type, &ip, ref);
+	if (type == DT_POLYTYPE_OFFMESH_CONNECTION)
+	{
+		if (ip >= m_offMeshConnections.Capacity())
+			return false;
+		if (m_offMeshConnections[ip].salt != salt)
+			return false;
+	}
+	else
+	{
+		//if (it >= (unsigned int)m_tiles.Capacity()) // LWF_TMP
+		if (it >= (unsigned int)m_maxTiles)
+			return false;
+		if (m_tiles[it].salt != salt || m_tiles[it].header == 0)
+			return false;
+		if (ip >= (unsigned int)m_tiles[it].header->polyCount)
+			return false;
+	}
 	return true;
 }
 
@@ -1172,8 +1709,8 @@ dtStatus dtNavMesh::removeTile(dtTileRef ref, unsigned char** data, int* dataSiz
 {
 	if (!ref)
 		return DT_FAILURE | DT_INVALID_PARAM;
-	unsigned int tileIndex = decodePolyIdTile((dtPolyRef)ref);
-	unsigned int tileSalt = decodePolyIdSalt((dtPolyRef)ref);
+	unsigned int tileIndex = DecodePolyIdTile((dtPolyRef)ref);
+	unsigned int tileSalt = DecodePolyIdSalt((dtPolyRef)ref);
 	if ((int)tileIndex >= m_maxTiles)
 		return DT_FAILURE | DT_INVALID_PARAM;
 	dtMeshTile* tile = &m_tiles[tileIndex];
@@ -1218,6 +1755,13 @@ dtStatus dtNavMesh::removeTile(dtTileRef ref, unsigned char** data, int* dataSiz
 		for (int j = 0; j < nneis; ++j)
 			unconnectLinks(neis[j], tile);
 	}
+
+	// Remove links to connected tiles.
+	UnconnectLinks(tile);
+	// Remove off-mesh connections connected to the tile.
+	// unconnectLinks() unconnects most of them, but one-directional
+	// links may not be unconnected.
+	UnconnectOffMeshConnectionsToTile(ref);
 		
 	// Reset tile.
 	if (tile->flags & DT_TILE_FREE_DATA)
@@ -1237,15 +1781,12 @@ dtStatus dtNavMesh::removeTile(dtTileRef ref, unsigned char** data, int* dataSiz
 
 	tile->header = 0;
 	tile->flags = 0;
-	tile->linksFreeList = 0;
 	tile->polys = 0;
 	tile->verts = 0;
-	tile->links = 0;
 	tile->detailMeshes = 0;
 	tile->detailVerts = 0;
 	tile->detailTris = 0;
 	tile->bvTree = 0;
-	tile->offMeshCons = 0;
 
 	// Update salt, salt should never be zero.
 #ifdef DT_POLYREF64
@@ -1267,7 +1808,7 @@ dtTileRef dtNavMesh::getTileRef(const dtMeshTile* tile) const
 {
 	if (!tile) return 0;
 	const unsigned int it = (unsigned int)(tile - m_tiles);
-	return (dtTileRef)encodePolyId(tile->salt, it, 0);
+	return (dtTileRef)EncodePolyId(tile->salt, it, 0, 0);
 }
 
 /// @par
@@ -1288,7 +1829,7 @@ dtPolyRef dtNavMesh::getPolyRefBase(const dtMeshTile* tile) const
 {
 	if (!tile) return 0;
 	const unsigned int it = (unsigned int)(tile - m_tiles);
-	return encodePolyId(tile->salt, it, 0);
+	return EncodePolyId(tile->salt, it, 0, 0);// 第一个Poly的编码
 }
 
 struct dtTileState
@@ -1387,79 +1928,149 @@ dtStatus dtNavMesh::restoreTileState(dtMeshTile* tile, const unsigned char* data
 /// inside a normal polygon. So an off-mesh connection is "entered" from a 
 /// normal polygon at one of its endpoints. This is the polygon identified by 
 /// the prevRef parameter.
+/// 找到起终点
 dtStatus dtNavMesh::getOffMeshConnectionPolyEndPoints(dtPolyRef prevRef, dtPolyRef polyRef, float* startPos, float* endPos) const
 {
-	unsigned int salt, it, ip;
-
-	if (!polyRef)
+	// 检查Poly合法性
+	if (!isValidPolyRef(polyRef))
 		return DT_FAILURE;
-	
-	// Get current polygon
-	decodePolyId(polyRef, salt, it, ip);
-	if (it >= (unsigned int)m_maxTiles) return DT_FAILURE | DT_INVALID_PARAM;
-	if (m_tiles[it].salt != salt || m_tiles[it].header == 0) return DT_FAILURE | DT_INVALID_PARAM;
-	const dtMeshTile* tile = &m_tiles[it];
-	if (ip >= (unsigned int)tile->header->polyCount) return DT_FAILURE | DT_INVALID_PARAM;
-	const dtPoly* poly = &tile->polys[ip];
 
+	// 检查Type
 	// Make sure that the current poly is indeed off-mesh link.
-	if (poly->getType() != DT_POLYTYPE_OFFMESH_CONNECTION)
+	if (DecodePolyIdType(polyRef) != DT_POLYTYPE_OFFMESH_CONNECTION)
 		return DT_FAILURE;
 
 	// Figure out which way to hand out the vertices.
 	int idx0 = 0, idx1 = 1;
 	
-	// Find link that points to first vertex.
-	for (unsigned int i = poly->firstLink; i != DT_NULL_LINK; i = tile->links[i].next)
+	const dtOffMeshConnection* con = GetOffMeshConnection(polyRef);
+	if (con == NULL)
+		return DT_FAILURE | DT_INVALID_PARAM;
+
+	// 找到Poly的连接到目标Poly的Link
+	// Find link which leads to previous polygon to figure out which way we are travering the off-mesh connection.
+	const dtLink* foundLink = NULL;
+	//for (const dtLink* link = GetLink(con->firstLink); link != NULL; link = GetNextLink(link))
+	for (const dtLink* link = GetFirstLink(polyRef); link != NULL; link = GetNextLink(link))
 	{
-		if (tile->links[i].edge == 0)
+		if (link->ref == prevRef)
 		{
-			if (tile->links[i].ref != prevRef)
-			{
-				idx0 = 1;
-				idx1 = 0;
-			}
+			foundLink = link;
 			break;
 		}
 	}
+	if (!foundLink)
+		return DT_FAILURE;
 	
-	dtVcopy(startPos, &tile->verts[poly->verts[idx0]*3]);
-	dtVcopy(endPos, &tile->verts[poly->verts[idx1]*3]);
+	// OffMesh connection can only have edge 0 or 1
+	dtAssert(foundLink->edge == 0 || foundLink->edge == 1);
 
+	// Set endpoints based on direction
+	if (foundLink->edge == 0)
+	{
+		dtVcopy(startPos, con->endPoints[0].pos);
+		dtVcopy(endPos, con->endPoints[1].pos);
+		return DT_SUCCESS;
+	}
+	else if (foundLink->edge == 1) // 相反方向
+	{
+		dtVcopy(startPos, con->endPoints[1].pos);
+		dtVcopy(endPos, con->endPoints[0].pos);
+		return DT_SUCCESS;
+	}
+
+	return DT_FAILURE;
+}
+
+dtStatus dtNavMesh::SetOffMeshConnectionCostModifier(dtPolyRef ref, float costOverride)
+{
+	if (DecodePolyIdType(ref) != DT_POLYTYPE_OFFMESH_CONNECTION)
+		return DT_FAILURE | DT_INVALID_PARAM;
+	dtOffMeshConnection* con = GetOffMeshConnectionUnsafe(ref);
+	if (con == NULL)
+		return  DT_FAILURE | DT_INVALID_PARAM;
+
+	if (costOverride >= 0.0f)
+		con->costModifier = costOverride;
+	else
+		con->costModifier = -1.0f;
+
+	//BumpTimeStamp();
 	return DT_SUCCESS;
 }
 
-
-const dtOffMeshConnection* dtNavMesh::getOffMeshConnectionByRef(dtPolyRef ref) const
+dtStatus dtNavMesh::SetOffMeshConnectionFlags(dtPolyRef ref, unsigned int flags)
 {
-	unsigned int salt, it, ip;
-	
-	if (!ref)
-		return 0;
-	
-	// Get current polygon
-	decodePolyId(ref, salt, it, ip);
-	if (it >= (unsigned int)m_maxTiles) return 0;
-	if (m_tiles[it].salt != salt || m_tiles[it].header == 0) return 0;
-	const dtMeshTile* tile = &m_tiles[it];
-	if (ip >= (unsigned int)tile->header->polyCount) return 0;
-	const dtPoly* poly = &tile->polys[ip];
-	
-	// Make sure that the current poly is indeed off-mesh link.
-	if (poly->getType() != DT_POLYTYPE_OFFMESH_CONNECTION)
-		return 0;
+	if (DecodePolyIdType(ref) != DT_POLYTYPE_OFFMESH_CONNECTION)
+		return DT_FAILURE | DT_INVALID_PARAM;
+	dtOffMeshConnection* con = GetOffMeshConnectionUnsafe(ref);
+	if (con == NULL)
+		return DT_FAILURE | DT_INVALID_PARAM;
+	con->flags = flags;
 
-	const unsigned int idx =  ip - tile->header->offMeshBase;
-	dtAssert(idx < (unsigned int)tile->header->offMeshConCount);
-	return &tile->offMeshCons[idx];
+	//BumpTimeStamp();
+	return DT_SUCCESS;
 }
 
+void dtNavMesh::SetOffMeshConnectionActive(dtPolyRef ref, bool active)
+{
+	unsigned int flags = 0;
+	unsigned char area = 0;
+	GetPolyFlagsAndArea(ref, &flags, &area);
+	if ((flags == 0 && !active) || (flags != 0 && active))
+		return;
+	if (active)
+		SetOffMeshConnectionFlags(ref, 1 << (unsigned int)area);
+	else
+		SetOffMeshConnectionFlags(ref, 0);
+}
+
+// 获取OffMesh
+const dtOffMeshConnection* dtNavMesh::GetOffMeshConnection(const dtPolyRef ref) const
+{
+	if (DecodePolyIdType(ref) != DT_POLYTYPE_OFFMESH_CONNECTION) // 检查类型
+		return NULL;
+
+	// 检查下标
+	unsigned int index = DecodePolyIdPoly(ref);
+	if (index >= m_offMeshConnections.Capacity())
+		return NULL;
+
+	// Salt 更新状态
+	unsigned int salt = DecodePolyIdSalt(ref);
+	if (salt != m_offMeshConnections[index].salt)
+		return NULL;
+
+	return &m_offMeshConnections[index];
+}
+
+// 非Constant版
+dtOffMeshConnection* dtNavMesh::GetOffMeshConnectionUnsafe(const dtPolyRef ref)
+{
+	if (DecodePolyIdType(ref) != DT_POLYTYPE_OFFMESH_CONNECTION)// 检查类型
+		return NULL;
+
+	// 检查下标
+	unsigned int index = DecodePolyIdPoly(ref);
+	if (index >= m_offMeshConnections.Capacity())
+		return NULL;
+
+	// Salt 更新状态
+	unsigned int salt = DecodePolyIdSalt(ref);
+	if (salt != m_offMeshConnections[index].salt)
+		return NULL;
+
+	return &m_offMeshConnections[index];
+}
 
 dtStatus dtNavMesh::setPolyFlags(dtPolyRef ref, unsigned short flags)
 {
 	if (!ref) return DT_FAILURE;
-	unsigned int salt, it, ip;
-	decodePolyId(ref, salt, it, ip);
+	unsigned int salt, it,type, ip;
+	//decodePolyId(ref, salt, it, ip);
+	DecodePolyId(&salt, &it, &type, &ip, ref);// 解码出来
+
+	// 检查一遍各个索引是否合理
 	if (it >= (unsigned int)m_maxTiles) return DT_FAILURE | DT_INVALID_PARAM;
 	if (m_tiles[it].salt != salt || m_tiles[it].header == 0) return DT_FAILURE | DT_INVALID_PARAM;
 	dtMeshTile* tile = &m_tiles[it];
@@ -1472,27 +2083,34 @@ dtStatus dtNavMesh::setPolyFlags(dtPolyRef ref, unsigned short flags)
 	return DT_SUCCESS;
 }
 
-dtStatus dtNavMesh::getPolyFlags(dtPolyRef ref, unsigned short* resultFlags) const
+unsigned int dtNavMesh::GetPolyFlags(dtPolyRef ref) const
 {
-	if (!ref) return DT_FAILURE;
-	unsigned int salt, it, ip;
-	decodePolyId(ref, salt, it, ip);
-	if (it >= (unsigned int)m_maxTiles) return DT_FAILURE | DT_INVALID_PARAM;
-	if (m_tiles[it].salt != salt || m_tiles[it].header == 0) return DT_FAILURE | DT_INVALID_PARAM;
-	const dtMeshTile* tile = &m_tiles[it];
-	if (ip >= (unsigned int)tile->header->polyCount) return DT_FAILURE | DT_INVALID_PARAM;
-	const dtPoly* poly = &tile->polys[ip];
-
-	*resultFlags = poly->flags;
-	
-	return DT_SUCCESS;
+	if (DecodePolyIdType(ref) == DT_POLYTYPE_OFFMESH_CONNECTION)
+	{
+		const dtOffMeshConnection* con = GetOffMeshConnection(ref);
+		if (con == NULL)
+			return 0;
+		return con->flags;
+	}
+	else
+	{
+		const dtMeshTile* tile = NULL;
+		const dtPoly* poly = NULL;
+		if (dtStatusFailed(getTileAndPolyByRef(ref, &tile, &poly)))
+			return 0;
+		return poly->flags;
+	}
+	return 0;
 }
 
 dtStatus dtNavMesh::setPolyArea(dtPolyRef ref, unsigned char area)
 {
 	if (!ref) return DT_FAILURE;
-	unsigned int salt, it, ip;
-	decodePolyId(ref, salt, it, ip);
+	unsigned int salt, it,type, ip;
+	//decodePolyId(ref, salt, it, ip);
+	DecodePolyId(&salt, &it, &type, &ip, ref);// 解码出来
+
+	// 检查一遍各个索引是否合理
 	if (it >= (unsigned int)m_maxTiles) return DT_FAILURE | DT_INVALID_PARAM;
 	if (m_tiles[it].salt != salt || m_tiles[it].header == 0) return DT_FAILURE | DT_INVALID_PARAM;
 	dtMeshTile* tile = &m_tiles[it];
@@ -1504,19 +2122,109 @@ dtStatus dtNavMesh::setPolyArea(dtPolyRef ref, unsigned char area)
 	return DT_SUCCESS;
 }
 
-dtStatus dtNavMesh::getPolyArea(dtPolyRef ref, unsigned char* resultArea) const
+unsigned char dtNavMesh::GetPolyArea(dtPolyRef ref) const
 {
-	if (!ref) return DT_FAILURE;
-	unsigned int salt, it, ip;
-	decodePolyId(ref, salt, it, ip);
-	if (it >= (unsigned int)m_maxTiles) return DT_FAILURE | DT_INVALID_PARAM;
-	if (m_tiles[it].salt != salt || m_tiles[it].header == 0) return DT_FAILURE | DT_INVALID_PARAM;
-	const dtMeshTile* tile = &m_tiles[it];
-	if (ip >= (unsigned int)tile->header->polyCount) return DT_FAILURE | DT_INVALID_PARAM;
-	const dtPoly* poly = &tile->polys[ip];
-	
-	*resultArea = poly->getArea();
-	
-	return DT_SUCCESS;
+	if (DecodePolyIdType(ref) == DT_POLYTYPE_OFFMESH_CONNECTION)
+	{
+		const dtOffMeshConnection* con = GetOffMeshConnection(ref);
+		if (con == NULL)
+			return 0;
+		return con->area;
+	}
+	else
+	{
+		const dtMeshTile* tile = NULL;
+		const dtPoly* poly = NULL;
+		if (dtStatusFailed(getTileAndPolyByRef(ref, &tile, &poly)))
+			return 0;
+		return poly->area;
+	}
+	return 0;
+}
+
+void dtNavMesh::GetPolyFlagsAndArea(dtPolyRef ref, unsigned int* flags, unsigned char* area) const
+{
+	if (flags)
+		*flags = 0;
+	if (area)
+		*area = 0;
+
+	if (DecodePolyIdType(ref) == DT_POLYTYPE_OFFMESH_CONNECTION)
+	{
+		const dtOffMeshConnection* con = GetOffMeshConnection(ref);
+		if (con == NULL)
+			return;
+		if (flags)
+			*flags = con->flags;
+		if (area)
+			*area = con->area;
+	}
+	else
+	{
+		const dtMeshTile* tile = NULL;
+		const dtPoly* poly = NULL;
+		if (dtStatusFailed(getTileAndPolyByRef(ref, &tile, &poly)))
+			return;
+		if (flags)
+			*flags = poly->flags;
+		if (area)
+			*area = poly->area;
+	}
+}
+
+int dtNavMesh::GetPolyGeometry(dtPolyRef ref, float* verts, dtPolyRef* neighbours, int maxNeisPerEdge) const
+{
+	if (DecodePolyIdType(ref) == DT_POLYTYPE_OFFMESH_CONNECTION)
+	{
+		// TODO: should we return off-mesh link geometry?
+		return 0;
+	}
+	else
+	{
+		const dtMeshTile* tile = NULL;
+		const dtPoly* poly = NULL;
+		if (dtStatusFailed(getTileAndPolyByRef(ref, &tile, &poly)))
+			return 0;
+		const int nverts = poly->vertCount;
+
+		// Copy vertices
+		if (verts != NULL)
+		{
+			for (int i = 0; i < nverts; i++)
+				dtVcopy(&verts[i * 3], &tile->verts[poly->verts[i] * 3]);
+				//verts[i] = tile->verts[poly->verts[i]];
+		}
+
+		// Copy neighbours
+		if (neighbours != NULL)
+		{
+			for (int i = 0; i < nverts * maxNeisPerEdge; i++)
+				neighbours[i] = 0;
+
+			const unsigned int ip = GetPolyIndex(tile, poly);
+			const unsigned int firstLink = tile->polyLinks[ip];
+			for (const dtLink* link = GetLink(firstLink); link != NULL; link = GetNextLink(link))
+			{
+				// Only accept polygon connections.
+				if (DecodePolyIdType(link->ref) == DT_POLYTYPE_OFFMESH_CONNECTION)
+					continue;
+				int index = (int)link->edge;
+				if (index >= 0 && index < nverts)
+				{
+					// find empty slot
+					for (int j = 0; j < maxNeisPerEdge; j++)
+					{
+						if (neighbours[index * maxNeisPerEdge + j] == 0)
+						{
+							neighbours[index * maxNeisPerEdge + j] = link->ref;
+							break;
+						}
+					}
+				}
+			}
+		}
+		return nverts;
+	}
+	return 0;
 }
 

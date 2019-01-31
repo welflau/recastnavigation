@@ -374,6 +374,10 @@ void dtClosestPtPointTriangle(float* closest, const float* p,
 ///  @param[out]	h		The resulting height.
 bool dtClosestHeightPointTriangle(const float* p, const float* a, const float* b, const float* c, float& h);
 
+// It's assumed the triangle (a,b,c) is not degenerate - otherwise division by zero might occur
+// Èý½ÇÐÎµÄ
+void ClosestPtPointTriangle(float* dest, const float* p, const float* a, const float* b, const float* c);
+
 bool dtIntersectSegmentPoly2D(const float* p0, const float* p1,
 							  const float* verts, int nverts,
 							  float& tmin, float& tmax,

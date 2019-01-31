@@ -21,6 +21,7 @@
 
 #include "ChunkyTriMesh.h"
 #include "MeshLoaderObj.h"
+#include "DetourNavMesh.h"
 
 static const int MAX_CONVEXVOL_PTS = 12;
 struct ConvexVolume
@@ -68,7 +69,7 @@ struct BuildSettings
 	// Size of the tiles in voxels
 	float tileSize;
 };
-
+#define MAX_OMC_NUM 256
 class InputGeom
 {
 	rcChunkyTriMesh* m_chunkyMesh;
@@ -87,6 +88,7 @@ class InputGeom
 	unsigned short m_offMeshConFlags[MAX_OFFMESH_CONNECTIONS];
 	unsigned int m_offMeshConId[MAX_OFFMESH_CONNECTIONS];
 	int m_offMeshConCount;
+	dtPolyRef m_OffMeshConnects[MAX_OMC_NUM];
 	///@}
 
 	/// @name Convex Volumes.
@@ -115,6 +117,7 @@ public:
 	const rcChunkyTriMesh* getChunkyMesh() const { return m_chunkyMesh; }
 	const BuildSettings* getBuildSettings() const { return m_hasBuildSettings ? &m_buildSettings : 0; }
 	bool raycastMesh(float* src, float* dst, float& tmin);
+	void getTilePos(const float* pos, int& tx, int& ty);
 
 	/// @name Off-Mesh connections.
 	///@{
@@ -125,9 +128,11 @@ public:
 	const unsigned char* getOffMeshConnectionAreas() const { return m_offMeshConAreas; }
 	const unsigned short* getOffMeshConnectionFlags() const { return m_offMeshConFlags; }
 	const unsigned int* getOffMeshConnectionId() const { return m_offMeshConId; }
-	void addOffMeshConnection(const float* spos, const float* epos, const float rad,
+	int addOffMeshConnection(const float* spos, const float* epos, const float rad,
 							  unsigned char bidir, unsigned char area, unsigned short flags);
 	void deleteOffMeshConnection(int i);
+	void SetOffMeshRef(int i,dtPolyRef ref);
+	dtPolyRef GetOffMeshRef(int i);
 	void drawOffMeshConnections(struct duDebugDraw* dd, bool hilight = false);
 	///@}
 

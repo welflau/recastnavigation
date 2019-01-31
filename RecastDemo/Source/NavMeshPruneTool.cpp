@@ -153,9 +153,10 @@ static void floodNavmesh(dtNavMesh* nav, NavmeshFlags* flags, dtPolyRef start, u
 		nav->getTileAndPolyByRefUnsafe(ref, &tile, &poly);
 
 		// Visit linked polygons.
-		for (unsigned int i = poly->firstLink; i != DT_NULL_LINK; i = tile->links[i].next)
+		for (const dtLink* link = nav->GetFirstLink(ref); link != NULL; link = nav->GetNextLink(link))
 		{
-			const dtPolyRef neiRef = tile->links[i].ref;
+			//const dtPolyRef neiRef = tile->links[i].ref;
+			const dtPolyRef neiRef = link->ref;
 			// Skip invalid and already visited.
 			if (!neiRef || flags->getFlags(neiRef))
 				continue;
@@ -176,11 +177,11 @@ static void disableUnvisitedPolys(dtNavMesh* nav, NavmeshFlags* flags)
 		const dtPolyRef base = nav->getPolyRefBase(tile);
 		for (int j = 0; j < tile->header->polyCount; ++j)
 		{
-			const dtPolyRef ref = base | (unsigned int)j;
+			//const dtPolyRef ref = base | (unsigned int)j;
+			const dtPolyRef ref = base | nav->EncodeBasePolyId(DT_POLYTYPE_GROUND, j);
 			if (!flags->getFlags(ref))
 			{
-				unsigned short f = 0;
-				nav->getPolyFlags(ref, &f);
+				unsigned int f = nav->GetPolyFlags(ref);
 				nav->setPolyFlags(ref, f | SAMPLE_POLYFLAGS_DISABLED);
 			}
 		}
@@ -300,7 +301,8 @@ void NavMeshPruneTool::handleRender()
 			const dtPolyRef base = nav->getPolyRefBase(tile);
 			for (int j = 0; j < tile->header->polyCount; ++j)
 			{
-				const dtPolyRef ref = base | (unsigned int)j;
+				//const dtPolyRef ref = base | (unsigned int)j;
+				const dtPolyRef ref = base | nav->EncodeBasePolyId(DT_POLYTYPE_GROUND, j); // Poly列表都是Ground类型
 				if (m_flags->getFlags(ref))
 				{
 					duDebugDrawNavMeshPoly(&dd, *nav, ref, duRGBA(255,255,255,128));

@@ -470,7 +470,12 @@ void Sample_TileMesh::handleRender()
 		if (m_drawMode == DRAWMODE_NAVMESH_PORTALS)
 			duDebugDrawNavMeshPortals(&m_dd, *m_navMesh);
 		if (m_drawMode == DRAWMODE_NAVMESH_NODES)
+		{
 			duDebugDrawNavMeshNodes(&m_dd, *m_navQuery);
+			//duDebugDrawNavMeshLinks(&m_dd, *m_navQuery, *m_navMesh);
+			
+		}
+			
 		duDebugDrawNavMeshPolysWithFlags(&m_dd, *m_navMesh, SAMPLE_POLYFLAGS_DISABLED, duRGBA(0,0,0,128));
 	}
 	
@@ -611,6 +616,12 @@ bool Sample_TileMesh::handleBuild()
 	params.maxTiles = m_maxTiles;
 	params.maxPolys = m_maxPolysPerTile;
 	
+	params.cellSize = m_cellSize;
+	params.tileSize = m_tileSize;
+	params.agentHeight = m_agentHeight;
+	params.agentRadius = m_agentRadius;
+	params.agentMaxClimb = m_agentMaxClimb;
+
 	dtStatus status;
 	
 	status = m_navMesh->init(&params);
