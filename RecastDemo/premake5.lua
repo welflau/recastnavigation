@@ -56,7 +56,8 @@ project "DebugUtils"
 		"../DebugUtils/Include",
 		"../Detour/Include",
 		"../DetourTileCache/Include",
-		"../Recast/Include"
+		"../Recast/Include",
+		"../Math/Include"
 	}
 	files { 
 		"../DebugUtils/Include/*.h",
@@ -67,7 +68,8 @@ project "Detour"
 	language "C++"
 	kind "StaticLib"
 	includedirs { 
-		"../Detour/Include" 
+		"../Detour/Include",
+		"../Math/Include"
 	}
 	files { 
 		"../Detour/Include/*.h", 
@@ -80,7 +82,8 @@ project "DetourCrowd"
 	includedirs {
 		"../DetourCrowd/Include",
 		"../Detour/Include",
-		"../Recast/Include"
+		"../Recast/Include",
+		"../Math/Include"
 	}
 	files {
 		"../DetourCrowd/Include/*.h",
@@ -93,7 +96,8 @@ project "DetourTileCache"
 	includedirs {
 		"../DetourTileCache/Include",
 		"../Detour/Include",
-		"../Recast/Include"
+		"../Recast/Include",
+		"../Math/Include"
 	}
 	files {
 		"../DetourTileCache/Include/*.h",
@@ -110,6 +114,17 @@ project "Recast"
 		"../Recast/Include/*.h",
 		"../Recast/Source/*.cpp" 
 	}
+	
+project "Math"
+	language "C++"
+	kind "StaticLib"
+	includedirs { 
+		"../Math/Include" 
+	}
+	files { 
+		"../Math/Include/*.h",
+		"../Math/Source/*.cpp" 
+	}
 
 project "RecastDemo"
 	language "C++"
@@ -122,7 +137,8 @@ project "RecastDemo"
 		"../Detour/Include",
 		"../DetourCrowd/Include",
 		"../DetourTileCache/Include",
-		"../Recast/Include"
+		"../Recast/Include",
+		"../Math/Include"
 	}
 	files	{ 
 		"../RecastDemo/Include/*.h",
@@ -137,7 +153,8 @@ project "RecastDemo"
 		"Detour",
 		"DetourCrowd",
 		"DetourTileCache",
-		"Recast"
+		"Recast",
+		"Math"
 	}
 
 	-- distribute executable in RecastDemo/Bin directory
