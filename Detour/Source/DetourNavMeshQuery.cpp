@@ -431,9 +431,9 @@ dtStatus dtNavMeshQuery::findRandomPointAroundCircle(dtPolyRef startRef, const f
 					continue;
 			
 				// Expand to neighbour
-				const dtMeshTile* neighbourTile = 0;
-				const dtPoly* neighbourPoly = 0;
-				m_nav->getTileAndPolyByRefUnsafe(neighbourRef, &neighbourTile, &neighbourPoly);
+// 				const dtMeshTile* neighbourTile = 0;
+// 				const dtPoly* neighbourPoly = 0;
+// 				m_nav->getTileAndPolyByRefUnsafe(neighbourRef, &neighbourTile, &neighbourPoly);
 			
 				// Do not advance if the polygon is excluded by the filter.
 				if (!filter->PassFilter(m_nav->GetPolyFlags(neighbourRef)))
@@ -1325,16 +1325,16 @@ dtStatus dtNavMeshQuery::findPath(dtPolyRef startRef, dtPolyRef endRef,
 				continue;
 			
 
-			if (m_nav->DecodePolyIdType(neighbourRef) == DT_POLYTYPE_OFFMESH_CONNECTION) // OMC类型
-			{
-				if (!filter->PassFilter(m_nav->GetPolyFlags(neighbourRef)))
-					continue;
-			}
+// 			if (m_nav->DecodePolyIdType(neighbourRef) == DT_POLYTYPE_OFFMESH_CONNECTION) // OMC类型
+// 			{
+// 				if (!filter->PassFilter(m_nav->GetPolyFlags(neighbourRef)))
+// 					continue;
+// 			}
 			// Get neighbour poly and tile.
 			// The API input has been cheked already, skip checking internal data.
-			const dtMeshTile* neighbourTile = 0;
-			const dtPoly* neighbourPoly = 0;
-			m_nav->getTileAndPolyByRefUnsafe(neighbourRef, &neighbourTile, &neighbourPoly);			
+// 			const dtMeshTile* neighbourTile = 0;
+// 			const dtPoly* neighbourPoly = 0;
+// 			m_nav->getTileAndPolyByRefUnsafe(neighbourRef, &neighbourTile, &neighbourPoly);			
 			
 			//if (!filter->passFilter(neighbourRef, neighbourTile, neighbourPoly))
 			if (!filter->PassFilter(m_nav->GetPolyFlags(neighbourRef)))
@@ -1633,9 +1633,9 @@ dtStatus dtNavMeshQuery::updateSlicedFindPath(const int maxIter, int* doneIters)
 			
 			// Get neighbour poly and tile.
 			// The API input has been cheked already, skip checking internal data.
-			const dtMeshTile* neighbourTile = 0;
-			const dtPoly* neighbourPoly = 0;
-			m_nav->getTileAndPolyByRefUnsafe(neighbourRef, &neighbourTile, &neighbourPoly);			
+// 			const dtMeshTile* neighbourTile = 0;
+// 			const dtPoly* neighbourPoly = 0;
+// 			m_nav->getTileAndPolyByRefUnsafe(neighbourRef, &neighbourTile, &neighbourPoly);			
 			
 			if (!m_query.filter->PassFilter(m_nav->GetPolyFlags(neighbourRef)))
 				continue;
@@ -3055,9 +3055,9 @@ dtStatus dtNavMeshQuery::findPolysAroundCircle(dtPolyRef startRef, const float* 
 				continue;
 			
 			// Expand to neighbour
-			const dtMeshTile* neighbourTile = 0;
-			const dtPoly* neighbourPoly = 0;
-			m_nav->getTileAndPolyByRefUnsafe(neighbourRef, &neighbourTile, &neighbourPoly);
+// 			const dtMeshTile* neighbourTile = 0;
+// 			const dtPoly* neighbourPoly = 0;
+// 			m_nav->getTileAndPolyByRefUnsafe(neighbourRef, &neighbourTile, &neighbourPoly);
 		
 			// Do not advance if the polygon is excluded by the filter.
 			if (!filter->PassFilter(m_nav->GetPolyFlags(neighbourRef)))
@@ -3224,9 +3224,9 @@ dtStatus dtNavMeshQuery::findPolysAroundShape(dtPolyRef startRef, const float* v
 				continue;
 			
 			// Expand to neighbour
-			const dtMeshTile* neighbourTile = 0;
-			const dtPoly* neighbourPoly = 0;
-			m_nav->getTileAndPolyByRefUnsafe(neighbourRef, &neighbourTile, &neighbourPoly);
+// 			const dtMeshTile* neighbourTile = 0;
+// 			const dtPoly* neighbourPoly = 0;
+// 			m_nav->getTileAndPolyByRefUnsafe(neighbourRef, &neighbourTile, &neighbourPoly);
 			
 			// Do not advance if the polygon is excluded by the filter.
 			//if (!filter->passFilter(neighbourRef, neighbourTile, neighbourPoly))
@@ -3813,9 +3813,9 @@ dtStatus dtNavMeshQuery::findDistanceToWall(dtPolyRef startRef, const float* cen
 				continue;
 			
 			// Expand to neighbour.
-			const dtMeshTile* neighbourTile = 0;
-			const dtPoly* neighbourPoly = 0;
-			m_nav->getTileAndPolyByRefUnsafe(neighbourRef, &neighbourTile, &neighbourPoly);
+// 			const dtMeshTile* neighbourTile = 0;
+// 			const dtPoly* neighbourPoly = 0;
+// 			m_nav->getTileAndPolyByRefUnsafe(neighbourRef, &neighbourTile, &neighbourPoly);
 			
 			// Skip off-mesh connections.
 			if (m_nav->DecodePolyIdType(neighbourRef) == DT_POLYTYPE_OFFMESH_CONNECTION)
